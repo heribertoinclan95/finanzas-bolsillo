@@ -1,6 +1,6 @@
 # Finanzas de Bolsillo — guía para Claude
 
-App personal de finanzas de Heri para iPhone. PWA estática servida desde Cloudflare Pages (conectado a `main`, raíz, sin build; `_headers` evita caché de la app). GitHub Pages no abre con datos de Telcel. Sin build, sin frameworks, sin dependencias: HTML + CSS + JS plano.
+App personal de finanzas de Heri para iPhone. PWA estática servida desde Cloudflare Workers (conectado a `main`; `wrangler.jsonc` publica la raíz como assets estáticos, `.assetsignore` deja fuera tests/docs, `_headers` evita caché de la app). GitHub Pages no abre con datos de Telcel. Sin build, sin frameworks, sin dependencias: HTML + CSS + JS plano.
 
 ## Reglas del proyecto
 

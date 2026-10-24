@@ -1,0 +1,8 @@
+// Cloudflare Workers: publica la carpeta raíz como sitio estático (sin build).
+{
+  "name": "finanzas-bolsillo",
+  "compatibility_date": "2026-10-01",
+  "assets": {
+    "directory": "./"
+  }
+}
