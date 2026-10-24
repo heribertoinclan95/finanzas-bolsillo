@@ -15,7 +15,7 @@ Tus movimientos se guardan **en el iPhone** (y en tu hoja si conectas el Apps Sc
 
 ## Instalar en el iPhone
 
-1. Abre en **Safari**: `https://heribertoinclan95.github.io/finanzas-bolsillo/`
+1. Abre en **Safari**: la dirección de Cloudflare Pages del proyecto (`*.pages.dev`). La copia de GitHub Pages (`heribertoinclan95.github.io/finanzas-bolsillo/`) no abre con datos de Telcel.
 2. Botón **Compartir** → **Agregar a inicio** → **Agregar**.
 3. Ábrela siempre desde el ícono (así queda a pantalla completa y sin barra de Safari).
 
@@ -43,7 +43,7 @@ Si cambias `Code.gs` después, publica con **Implementar → Administrar impleme
 
 ## Publicar cambios
 
-Cada push a `main` actualiza GitHub Pages en 1–2 minutos. Para que el iPhone tome la versión nueva de inmediato, sube `VERSION` en `sw.js` y abre la app dos veces.
+Cada push a `main` se publica solo en Cloudflare Pages (y en GitHub Pages) en 1–2 minutos. Para que el iPhone tome la versión nueva de inmediato, sube `VERSION` en `sw.js` y abre la app dos veces.
 
 ## Trabajar con Claude Code
 
