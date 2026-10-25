@@ -204,6 +204,15 @@ button.mrow{background:none;border:0;border-bottom:1px solid var(--line);border-
 button.mrow:last-child{border-bottom:0}
 .sync .note+.note{margin-top:4px}
 
+/* Inicio: cuenta compacta bajo el número (ingresos − gastos − apartado = disponible) */
+.cuenta{margin-top:12px;background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:2px 12px}
+.cuenta .paso{display:flex;justify-content:space-between;align-items:baseline;gap:10px;padding:6px 0;font-size:14px}
+.cuenta .paso+.paso{border-top:1px solid var(--line)}
+.cuenta .paso .num.in{color:var(--in)}
+.cuenta .paso.total{border-top:2px solid var(--ink);font-weight:700}
+.cuenta .paso.total .num{font-size:16px}
+.fuente{margin:6px 2px 0;font-size:12px;color:var(--muted)}
+
 /* Barras horizontales: tocar una fila muestra el valor exacto */
 button.bar{border:0;background:none;padding:0;width:100%;text-align:left;font:inherit;color:inherit;border-radius:6px}
 .bar .exact{display:none;font-size:13px}

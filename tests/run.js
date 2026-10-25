@@ -137,6 +137,32 @@ const t = async (name, fn) => { await fn(); n++; console.log("✓", name); };
     const r = a.resumenMes("2026-10", "2026-10-24");
     cerca(r.disponible, 1000 - 5000 - 200); cerca(r.diario, 0); cerca(r.faltaMeta, 200);
   });
+  await t("explicaMargen: la cuenta cuadra con el disponible, nombra la causa y dice de dónde salen los datos", () => {
+    const { api: a } = cargar(conMovs([mov("g", "2026-10-02", "super", "Super", 2015)]));
+    const r = a.resumenMes("2026-10", "2026-10-24"), ex = a.explicaMargen(r);
+    cerca(r.disponible, -2015); assert.strictEqual(r.nIng, 0);
+    cerca(ex.pasos.filter(p => !p.total).reduce((s, p) => s + p.monto, 0), ex.pasos.find(p => p.total).monto);
+    assert.ok(ex.causa.startsWith("Sin ingresos registrados en octubre"));
+    assert.strictEqual(r.origen.hoja, 0); assert.strictEqual(r.origen.local, 1); assert.strictEqual(r.origen.pend, 1);
+    // con ingresos, la meta del 20% es lo que vuelve negativo el margen
+    const { api: b } = cargar(conMovs([mov("i", "2026-10-01", "nómina", "Ingreso", 10000, "Ingreso"), mov("g", "2026-10-02", "renta", "Renta", 9000)]));
+    const r2 = b.resumenMes("2026-10", "2026-10-24"), ex2 = b.explicaMargen(r2);
+    cerca(r2.disponible, -1000); assert.ok(ex2.causa.startsWith("Ibas $1,000 a favor"));
+    const res = ex2.pasos.find(p => p.k === "reserva"); cerca(res.monto, -2000); assert.strictEqual(res.label, "Meta de inversión (20%)");
+    // filas de la hoja + capturas: el origen distingue de dónde viene cada movimiento
+    const store = conMovs([mov("c", "2026-10-03", "z", "Comida", 30), mov("e", "2026-10-04", "w", "Comida", 5, "Egreso", { exportado: true, enviado: "2026-10-04T10:00:00Z" })]);
+    store[DKEY] = JSON.stringify({ leido: "2026-10-02T00:00:00Z", filas: [["2026-10-01", "X", "Comida", 10, "Egreso", "C"], ["2026-10-01", "NOMINA", "Ingreso", 500, "Ingreso", "C"]] });
+    const r3 = cargar(store).api.resumenMes("2026-10", "2026-10-24");
+    assert.strictEqual(r3.n, 4); assert.strictEqual(r3.nIng, 1);
+    assert.strictEqual(r3.origen.hoja, 2); assert.strictEqual(r3.origen.local, 2); assert.strictEqual(r3.origen.pend, 1);
+  });
+  await t("Inicio pinta la cuenta compacta con la causa, el total en negativo y el origen de los datos", () => {
+    const d = new Date(), ym = d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0");
+    const html = cargar(conMovs([mov("g", ym + "-02", "super", "Super", 2015)])).api.viewInicio();
+    assert.ok(html.includes('class="cuenta"') && html.includes("Sin ingresos registrados"));
+    assert.ok(html.includes('class="paso total"') && html.includes("−$2,015") && html.includes("1 movimiento: 1 de este cel (1 sin enviar) · hoja sin leer"));
+    assert.ok(!cargar(conMovs([mov("x", "2020-01-01", "comida", "Comida", 100)])).api.viewInicio().includes('class="cuenta"'));   // mes sin movimientos: sin cuenta
+  });
   await t("gasto diario sugerido reparte el margen en los días que faltan, solo en el mes en curso", () => {
     const { api: a } = cargar(conMovs([mov("i", "2026-10-01", "nómina", "Ingreso", 10000, "Ingreso"), mov("g", "2026-10-02", "super", "Super", 2000)]));
     const r = a.resumenMes("2026-10", "2026-10-24");
