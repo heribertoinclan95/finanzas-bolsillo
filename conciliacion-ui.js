@@ -26,10 +26,13 @@ function decidir(h, d, sinGuardar) {
   if (!sinGuardar) guardar();
 }
 const catSug = b => b.tipo === "Ingreso" ? "Ingreso" : (X.guessCat(b.desc) || "");
-function huellaDeRef(id) { const a = CZ.prepararApp(X.filas()).find(x => x.ref === id); return a ? a.huella : undefined; }
+/* filas() ya trae caché y devuelve el mismo arreglo mientras nada cambia; las huellas se calculan una vez por versión. */
+let _app = { src: null, rows: [] };
+function appRows() { const src = X.filas(); if (src !== _app.src) _app = { src, rows: CZ.prepararApp(src) }; return _app.rows; }
+function huellaDeRef(id) { const a = appRows().find(x => x.ref === id); return a ? a.huella : undefined; }
 function resultado() {
   const A = U.archivo; if (!A) return null;
-  return CZ.conciliar({ banco: A.movs, app: CZ.prepararApp(X.filas()), cuenta: cuentaActual(), cuentas: X.S.cfg.cuentas, tol: E.tol, decisiones: E.decisiones });
+  return CZ.conciliar({ banco: A.movs, app: appRows(), cuenta: cuentaActual(), cuentas: X.S.cfg.cuentas, tol: E.tol, decisiones: E.decisiones });
 }
 const movBanco = h => U.archivo && U.archivo.movs.find(m => m.huella === h);
 
@@ -86,10 +89,14 @@ function vValidar() {
   const nombreCol = i => i == null ? "—" : (A.encabezado && String(A.encabezado[i] || "").trim()) || "columna " + letra(i);
   const cols = [["Fecha", mp.fecha], ["Descripción", mp.desc], mp.cargo != null ? ["Cargo", mp.cargo] : null, mp.abono != null ? ["Abono", mp.abono] : null,
     mp.monto != null ? ["Importe", mp.monto] : null, mp.tipoCol != null ? ["Tipo", mp.tipoCol] : null, mp.id != null ? ["Referencia", mp.id] : null].filter(Boolean);
+  // Fechas futuras o un rango de más de un año casi siempre significan mes/día leído al revés.
+  const hoy = X.today(), futuras = m.filter(x => x.fecha > hoy).length, abarca = fechas.length ? CZ.dias(fechas[0], fechas[fechas.length - 1]) : 0;
+  const avisoFechas = futuras ? `${futuras} fecha${futuras > 1 ? "s" : ""} en el futuro` : abarca > 400 ? "el archivo abarca más de un año" : "";
   return `<section class="card">
     <div class="rowhead"><h3>Revisa cómo se leyó</h3><button type="button" class="link" data-cz="cancelar">Otro archivo</button></div>
     <p class="note"><b>${X.esc(A.nombre)}</b>${A.hojas.length > 1 ? ` · hoja “${X.esc(A.hojas[A.hoja].nombre)}”` : ""} · ${m.length} movimiento${m.length === 1 ? "" : "s"}${fechas.length ? ` del ${X.ddmmaa(fechas[0])} al ${X.ddmmaa(fechas[fechas.length - 1])}` : ""}</p>
     ${A.repetido ? `<p class="note warn">Este archivo ya lo conciliaste el ${X.fechaHora(A.repetido.f)}. Se aplican tus decisiones de entonces.</p>` : ""}
+    ${avisoFechas ? `<p class="note warn">Revisa el formato de fecha: ${avisoFechas}. Si tu banco usa mes/día, cámbialo en “Ajustar columnas”.</p>` : ""}
     <div style="margin-top:10px">${selCuenta()}</div>
     <div class="kpis" style="margin-top:10px">
       <div class="pill out"><span class="label">Cargos</span><span class="v num">${X.fmt.format(suma(eg))}</span><small class="sub">${eg.length} movimiento${eg.length === 1 ? "" : "s"}</small></div>
@@ -133,6 +140,7 @@ function filaBanco(b, extra) {
 }
 function motivos(c) {
   const t = [];
+  if (c.fueraPeriodo) t.push("fuera del periodo del archivo");
   if (c.dias) t.push(c.dias === 1 ? "1 día de diferencia" : c.dias + " días de diferencia");
   if (Math.abs(c.difMonto) >= 0.005) t.push("en la app " + X.fmtC.format(Math.abs(c.difMonto)) + (c.difMonto > 0 ? " más" : " menos"));
   if (c.otraCuenta) t.push("registrado en " + (c.a.cuenta || "otra cuenta"));
@@ -143,16 +151,16 @@ const filaApp = a => `<span class="d"><strong>${X.esc(a.desc || "—")}</strong>
 const btnEs = (b, a, txt) => `<button class="btn small" data-cz="es" data-h="${b.huella}" data-a="${a.huella}" data-id="${a.local ? X.esc(a.ref) : ""}">${txt}</button>`;
 function panelVincular(b, R) {
   const usadas = new Set(R.registrados.map(r => r.a.huella));
-  const lista = CZ.cercanos(b, CZ.prepararApp(X.filas()), usadas, Math.max(E.tol, 10));
+  const lista = CZ.cercanos(b, appRows(), usadas, Math.max(E.tol, 10));
   return `<div class="cz-cand"><span class="label">Vincular con un movimiento ya registrado</span>
     ${lista.length ? lista.map(({ a }) => `<div class="cz-c">${filaApp(a)}<span class="num">${X.fmtC.format(a.monto)}</span>${btnEs(b, a, "Vincular")}</div>`).join("") : `<p class="note">No hay movimientos del mismo tipo cerca de esa fecha.</p>`}
   </div>`;
 }
 function itemFaltante({ b }, R) {
-  const h = b.huella, sug = catSug(b);
+  const h = b.huella, sug = catSug(b), eraTraspaso = !!(E.decisiones[h] && E.decisiones[h].t === "g");
   return `<div class="cz-item">
     <label class="cz-head sel"><input type="checkbox" data-cz="sel" data-h="${h}" ${U.sel[h] ? "checked" : ""} aria-label="Seleccionar">${filaBanco(b, sug ? "sugerido: " + X.esc(sug) : "")}</label>
-    <div class="cz-acts"><button class="btn small acc" data-cz="registrar" data-h="${h}">Registrar</button><button class="btn small ghost" data-cz="vincular" data-h="${h}" aria-pressed="${U.abierto === h}">Vincular</button><button class="btn small ghost" data-cz="ignorar" data-h="${h}">Ignorar</button></div>
+    <div class="cz-acts"><button class="btn small acc" data-cz="registrar" data-h="${h}">Registrar</button><button class="btn small ghost" data-cz="vincular" data-h="${h}" aria-pressed="${U.abierto === h}">Vincular</button><button class="btn small ghost" data-cz="ignorar" data-h="${h}">Ignorar</button>${eraTraspaso ? `<button class="btn small ghost" data-cz="deshacer" data-h="${h}">Es traspaso</button>` : ""}</div>
     ${U.abierto === h ? panelVincular(b, R) : ""}
   </div>`;
 }

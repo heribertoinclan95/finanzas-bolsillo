@@ -59,6 +59,7 @@ function parseFecha(v, fmt) {
   }
   else if ((m = s.match(/^(\d{1,2})\s*(?:DE\s+)?[-/. ]*([A-Z]{3,})[-/. ,]*(?:DE\s+)?(\d{2,4})/))) { d = +m[1]; mo = mesNombre(m[2]); y = +m[3]; }
   else if ((m = s.match(/^([A-Z]{3,})[-/. ]*(\d{1,2})[-/. ,]*(\d{2,4})/))) { mo = mesNombre(m[1]); d = +m[2]; y = +m[3]; }
+  else if ((m = s.match(/^(\d{4})(\d{2})(\d{2})$/))) { y = +m[1]; mo = +m[2]; d = +m[3]; }
   else if (/^\d{5}$/.test(s)) return serialExcel(+s);
   else return null;
   if (!mo || mo < 1 || mo > 12 || !d || d < 1 || d > 31) return null;
@@ -232,7 +233,8 @@ const COLS = {
   desc: /descrip|concepto|detalle|movimiento|^memo|comercio|establecimiento|leyenda|narrative|beneficiario|observaci/,
   id: /^id\b|^referencia|folio|autorizaci|clave de rastreo|^num|^no\.? ?(de )?(ref|op|mov|tran)|transaction id|^ref\b/
 };
-const ORDEN = ["fecha", "saldo", "cargo", "abono", "monto", "tipo", "desc", "id"];
+const ORDEN = ["fecha", "saldo", "tipo", "cargo", "abono", "monto", "desc", "id"];   // "tipo" antes de "cargo": un encabezado "Cargo/Abono" es el tipo, no el importe
+const COLKEYS = ["fecha", "desc", "cargo", "abono", "monto", "tipoCol", "id", "saldo"];
 function estadisticas(rows, inicio) {
   const n = Math.max(...rows.slice(inicio, inicio + 80).map(r => r.length), 0), st = [];
   for (let j = 0; j < n; j++) {
@@ -240,7 +242,7 @@ function estadisticas(rows, inicio) {
     rows.slice(inicio, inicio + 80).forEach(r => {
       const v = r[j]; if (v == null || v === "") return;
       llenas++; distintos.add(String(v).toUpperCase());
-      if (parseFecha(v)) fechas++;
+      if (typeof v === "string" && !/^\d+([.,]\d+)?$/.test(v.trim()) && parseFecha(v)) fechas++;   // "12345" es referencia o importe, no fecha serial
       const m = typeof v === "number" ? v : (/^[\s$(+\-−–]*[\d.,]+[\s)\-−–]*(MXN|USD)?$/i.test(String(v)) ? parseMonto(v) : null);
       if (m != null) { nums++; suma += Math.abs(m); if (m < 0) neg++; } else len += String(v).length;
     });
@@ -248,16 +250,18 @@ function estadisticas(rows, inicio) {
   }
   return st;
 }
-function asignarNumericas(mapeo, st, libres) {
+function asignarNumericas(mapeo, st, libres, rows, inicio) {
   const nums = libres.filter(s => s.llenas && s.nums / s.llenas >= 0.6).sort((a, b) => b.llenas - a.llenas);
   if (!nums.length) return;
+  const muestra = rows.slice(inicio, inicio + 80), vale = (r, j) => { const m = parseMonto(r[j]); return m != null && m !== 0; };
+  // Cargo y abono casi nunca traen valor en la misma fila; importe y saldo sí.
+  const excluyentes = (a, b) => { let ambos = 0, alguno = 0; muestra.forEach(r => { const x = vale(r, a.j), y = vale(r, b.j); if (x || y) alguno++; if (x && y) ambos++; }); return alguno > 0 && ambos <= alguno * 0.1; };
   let resto = nums;
   if (resto.length >= 3) { const saldo = resto.slice().sort((a, b) => b.prom - a.prom)[0]; mapeo.saldo = saldo.j; resto = resto.filter(s => s !== saldo); }
   if (resto.length === 1) { mapeo.monto = resto[0].j; return; }
   const [a, b] = resto;
-  const exclusivos = a.llenas + b.llenas <= Math.max(a.llenas, b.llenas) * 1.3 + 2 && Math.abs(a.llenas - b.llenas) < Math.max(a.llenas, b.llenas);
-  if (exclusivos || resto.length === 2 && a.llenas !== b.llenas) {   // dos columnas que se alternan: cargo / abono (la de más filas suele ser cargos)
-    const cargo = a.neg > b.neg ? a : b.neg > a.neg ? b : a.llenas >= b.llenas ? a : b;
+  if (excluyentes(a, b)) {
+    const cargo = a.neg > b.neg ? a : b.neg > a.neg ? b : a.llenas >= b.llenas ? a : b;   // la de más filas suele ser cargos
     mapeo.cargo = cargo.j; mapeo.abono = (cargo === a ? b : a).j;
   } else { const saldo = a.prom >= b.prom ? a : b; mapeo.saldo = saldo.j; mapeo.monto = (saldo === a ? b : a).j; }
 }
@@ -273,7 +277,7 @@ function detectarColumnas(rows) {
     if (h.fecha != null && n >= 2) { enc = i; Object.assign(mapeo, { fecha: h.fecha, desc: h.desc ?? null, cargo: h.cargo ?? null, abono: h.abono ?? null, monto: h.monto ?? null, tipoCol: h.tipo ?? null, id: h.id ?? null, saldo: h.saldo ?? null, inicio: i + 1 }); }
   }
   const st = estadisticas(rows, Math.max(0, mapeo.inicio));
-  const usados = () => new Set(Object.values(mapeo).filter(v => typeof v === "number"));
+  const usados = () => new Set(COLKEYS.map(k => mapeo[k]).filter(v => typeof v === "number"));
   if (enc < 0) {
     const f = st.filter(s => s.llenas && s.fechas / s.llenas >= 0.5).sort((a, b) => b.fechas - a.fechas)[0];
     if (!f) return { mapeo, encabezado: null };
@@ -281,7 +285,7 @@ function detectarColumnas(rows) {
     mapeo.inicio = Math.max(0, rows.findIndex(r => parseFecha(r[f.j])));
   }
   if (mapeo.tipoCol != null && (st[mapeo.tipoCol] || {}).distintos > 6) { if (mapeo.desc == null) mapeo.desc = mapeo.tipoCol; mapeo.tipoCol = null; }
-  if (mapeo.cargo == null && mapeo.abono == null && mapeo.monto == null) asignarNumericas(mapeo, st, st.filter(s => !usados().has(s.j)));
+  if (mapeo.cargo == null && mapeo.abono == null && mapeo.monto == null) asignarNumericas(mapeo, st, st.filter(s => !usados().has(s.j)), rows, Math.max(0, mapeo.inicio));
   if (mapeo.desc == null) {
     const texto = st.filter(s => !usados().has(s.j) && s.llenas && s.nums / s.llenas < 0.4 && s.fechas / s.llenas < 0.5).sort((a, b) => b.len - a.len)[0];
     if (texto) mapeo.desc = texto.j; else if (mapeo.id != null) { mapeo.desc = mapeo.id; mapeo.id = null; }
@@ -366,6 +370,7 @@ const REGLAS = { pagoTarjeta: "Pago de tarjeta", traspaso: "Traspaso entre tus c
 
 /* ---------- Puntaje de una pareja banco ↔ app ---------- */
 const dias = (f1, f2) => Math.round(Math.abs(new Date(f1 + "T00:00:00Z") - new Date(f2 + "T00:00:00Z")) / 864e5);
+const shiftDays = (f, n) => new Date(new Date(f + "T00:00:00Z").getTime() + n * 864e5).toISOString().slice(0, 10);
 function puntuar(b, a, tol) {
   if (a.tipo !== b.tipo) return null;
   const d = dias(a.fecha, b.fecha); if (d > tol) return null;
@@ -405,10 +410,14 @@ function conciliar({ banco, app, cuenta, cuentas = [], tol = 3, decisiones = {} 
     if (dec && dec.t === "g") b.regla = null;   // el usuario dijo que sí es un gasto/ingreso normal
     pendientes.push(b);
   }
+  // Solo se comparan filas de la app dentro del periodo del archivo ± tolerancia (el historial completo son miles de filas).
+  const fechas = banco.map(b => b.fecha).sort(), desde = fechas[0] || null, hasta = fechas[fechas.length - 1] || null;
+  const ventana = desde ? app.filter(a => a.fecha >= shiftDays(desde, -tol) && a.fecha <= shiftDays(hasta, tol)) : [];
   const pares = [], candB = new Map(pendientes.map(b => [b, []])), candA = new Map();
-  for (const b of pendientes) for (const a of app) {
+  for (const b of pendientes) for (const a of ventana) {
     if (usadas.has(a.huella)) continue;
     const p = puntuar(b, a, tol); if (!p || p.score < CANDIDATO) continue;
+    if (a.fecha < desde || a.fecha > hasta) { p.fueraPeriodo = true; p.auto = false; }   // cruza el periodo: puede ser del estado de cuenta anterior o siguiente, se pregunta
     const par = { b, a, ...p }; pares.push(par); candB.get(b).push(par);
     if (!candA.has(a)) candA.set(a, []); candA.get(a).push(par);
   }
@@ -432,7 +441,6 @@ function conciliar({ banco, app, cuenta, cuentas = [], tol = 3, decisiones = {} 
     else if (candidatos.length) revisar.push({ b, candidatos });
     else faltantes.push({ b, candidatos: [] });
   }
-  const fechas = banco.map(b => b.fecha).sort(), desde = fechas[0] || null, hasta = fechas[fechas.length - 1] || null;
   const enRevision = new Set(revisar.flatMap(r => r.candidatos.map(c => c.a.huella)));
   const soloApp = app.filter(a => desde && !usadas.has(a.huella) && !enRevision.has(a.huella) && mismaCuenta(a.cuentaN, cuentaN) && a.fecha >= desde && a.fecha <= hasta);
   const porFecha = (x, y) => y.b.fecha.localeCompare(x.b.fecha) || x.b.n - y.b.n;
@@ -444,7 +452,8 @@ function conciliar({ banco, app, cuenta, cuentas = [], tol = 3, decisiones = {} 
 }
 /* Filas de la app cercanas a un movimiento del banco, para "Vincular con movimiento existente". */
 function cercanos(b, app, usadas, maxDias = 10, n = 8) {
-  return app.filter(a => a.tipo === b.tipo && !usadas.has(a.huella) && dias(a.fecha, b.fecha) <= maxDias)
+  const ini = shiftDays(b.fecha, -maxDias), fin = shiftDays(b.fecha, maxDias);
+  return app.filter(a => a.tipo === b.tipo && !usadas.has(a.huella) && a.fecha >= ini && a.fecha <= fin)
     .map(a => ({ a, dif: Math.abs(a.monto - b.monto), d: dias(a.fecha, b.fecha) }))
     .sort((x, y) => x.dif - y.dif || x.d - y.d).slice(0, n);
 }
@@ -460,6 +469,6 @@ function cargarEstado(storage) {
 function guardarEstado(storage, estado) { try { storage.setItem(KEY, JSON.stringify(estado)); return true; } catch (e) { return false; } }
 
 return { KEY, AUTO, CANDIDATO, REGLAS, parseCSV, detectarDelim, decodificar, parseFecha, parseMonto, detectarFormatoFecha, normDesc, normCuenta, mismaCuenta, tokens, similitud, hashTexto,
-  leerXLSX, leerArchivo, detectarColumnas, normalizar, sugerirInvertir, hashArchivo, prepararApp, especial, puntuar, conciliar, cercanos, dias,
+  leerXLSX, leerArchivo, detectarColumnas, normalizar, sugerirInvertir, hashArchivo, prepararApp, especial, puntuar, conciliar, cercanos, dias, shiftDays,
   nuevoEstado, cargarEstado, guardarEstado };
 });

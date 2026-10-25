@@ -51,6 +51,8 @@ Si cambias `Code.gs` después, publica con **Implementar → Administrar impleme
 
 El archivo no se guarda en el teléfono; solo tus decisiones, para que al volver a cargar el mismo estado de cuenta no se repita nada. Puedes borrarlas en la misma pantalla.
 
+Para probarlo desde la computadora: `node tests/servir.js` y abre `http://localhost:8765/` en Chrome (Ctrl+Shift+M para verla a 390 px). El paso a paso está en [`docs/conciliacion.md`](docs/conciliacion.md).
+
 ## Publicar cambios
 
 Cada push a `main` se publica solo en Cloudflare Pages (y en GitHub Pages) en 1–2 minutos. Para que el iPhone tome la versión nueva de inmediato, sube `VERSION` en `sw.js` y abre la app dos veces.

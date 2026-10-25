@@ -87,7 +87,7 @@ module.exports = async function () {
     assert.strictEqual(CZ.parseFecha("10/05/2026", "mdy"), "2026-10-05"); assert.strictEqual(CZ.parseFecha("10/05/2026", "dmy"), "2026-05-10");
     assert.strictEqual(CZ.parseFecha("05-OCT-2026"), "2026-10-05"); assert.strictEqual(CZ.parseFecha("5 oct 2026"), "2026-10-05");
     assert.strictEqual(CZ.parseFecha("5 de octubre de 2026"), "2026-10-05"); assert.strictEqual(CZ.parseFecha("Oct 5, 2026"), "2026-10-05");
-    assert.strictEqual(CZ.parseFecha(serial(2026, 10, 5)), "2026-10-05");
+    assert.strictEqual(CZ.parseFecha(serial(2026, 10, 5)), "2026-10-05"); assert.strictEqual(CZ.parseFecha("20261005"), "2026-10-05");
     assert.strictEqual(CZ.parseFecha("31/02/2026"), null); assert.strictEqual(CZ.parseFecha("hola"), null); assert.strictEqual(CZ.parseFecha(""), null);
     assert.strictEqual(CZ.detectarFormatoFecha(["01/10/2026", "10/13/2026"]), "mdy"); assert.strictEqual(CZ.detectarFormatoFecha(["01/10/2026", "25/10/2026"]), "dmy");
   });
@@ -149,14 +149,25 @@ module.exports = async function () {
     assert.strictEqual(R.registrados.length, 3); assert.strictEqual(R.faltantes.length, 0); assert.strictEqual(R.revisar.length, 0); assert.strictEqual(R.soloApp.length, 0);
     assert.ok(R.registrados.every(r => !r.manual && r.score >= CZ.AUTO));
   });
-  await t("fechas distintas: hasta 3 días coincide; más lejos va a Por revisar salvo que la descripción se parezca; fuera de tolerancia es Faltante", () => {
-    const b = banco(["05/10/2026,TAQUERIA EL GUERO,85.00,"]);
+  await t("fechas distintas dentro del periodo: hasta 3 días coincide; más lejos va a Por revisar salvo que la descripción se parezca; fuera de tolerancia es Faltante", () => {
+    const b = banco(["20/09/2026,COMISION,1.00,", "05/10/2026,TAQUERIA EL GUERO,85.00,"]);
     assert.strictEqual(conc(b, [fila("a", "2026-10-03", "tacos", 85)]).registrados.length, 1);
     const R = conc(b, [fila("a", "2026-09-29", "tacos", 85)], { tol: 10 });
-    assert.strictEqual(R.revisar.length, 1); assert.strictEqual(R.revisar[0].candidatos[0].dias, 6);
+    assert.strictEqual(R.revisar.length, 1); assert.strictEqual(R.revisar[0].candidatos[0].dias, 6); assert.ok(!R.revisar[0].candidatos[0].fueraPeriodo);
     assert.strictEqual(conc(b, [fila("a", "2026-09-29", "taqueria guero", 85)], { tol: 10 }).registrados.length, 1);
     const F = conc(b, [fila("a", "2026-09-29", "tacos", 85)]);
-    assert.strictEqual(F.faltantes.length, 1); assert.strictEqual(F.soloApp.length, 0);   // la fila de la app queda fuera del periodo del archivo
+    assert.strictEqual(F.faltantes.length, 2); assert.strictEqual(F.soloApp.length, 1);   // a 6 días con tolerancia 3: falta en el banco y sobra en la app
+  });
+  await t("cruce de periodo: una fila de la app anterior o posterior al archivo nunca se da por registrada sola; se confirma con “Es este”", () => {
+    const b = banco(["01/10/2026,OXXO GAS,50.00,", "15/10/2026,UBER TRIP,87.00,", "31/10/2026,CINEPOLIS,200.00,"]);
+    const app = [fila("sep", "2026-09-29", "oxxo", 50), fila("u", "2026-10-14", "uber", 87), fila("nov", "2026-11-02", "cine", 200)];
+    const R = conc(b, app);
+    assert.strictEqual(R.registrados.length, 1); assert.strictEqual(R.registrados[0].a.ref, "u");
+    assert.strictEqual(R.revisar.length, 2); assert.ok(R.revisar.every(x => x.candidatos[0].fueraPeriodo && x.candidatos[0].exacto));
+    assert.strictEqual(R.faltantes.length, 0); assert.strictEqual(R.soloApp.length, 0);
+    const R2 = conc(b, app, { decisiones: { [b[0].huella]: { t: "v", h: CZ.prepararApp(app)[0].huella, f: "x" } } });
+    assert.strictEqual(R2.registrados.length, 2); assert.strictEqual(R2.revisar.length, 1);
+    assert.strictEqual(conc(banco(["01/10/2026,OXXO,50.00,", "20/10/2026,COMISION,1.00,"]), [fila("a", "2026-10-03", "oxxo", 50)]).registrados.length, 1);   // dentro del periodo sigue siendo automático
   });
   await t("importes ligeramente distintos → Por revisar con la diferencia; muy distintos → Faltante", () => {
     const R = conc(banco(["05/10/2026,RESTAURANTE LA CASA,575.00,"]), [fila("a", "2026-10-05", "restaurante", 500)]);
@@ -212,6 +223,49 @@ module.exports = async function () {
     assert.strictEqual(R.registrados.length, 2); assert.ok(R.registrados.every(r => r.manual)); assert.strictEqual(R.ignorados.length, 1); assert.strictEqual(R.faltantes.length, 0);
     const R2 = CZ.conciliar({ banco: b, app: [], cuenta: "Cuenta SIMPLICITY", cuentas: CUENTAS, tol: 3, decisiones });
     assert.strictEqual(R2.faltantes.length, 2); assert.strictEqual(R2.ignorados.length, 1);   // los vínculos ya no encuentran su fila
+  });
+  await t("SIMPLICITY (débito): preámbulo, punto y coma, $0.00 en la columna vacía, referencia aparte, hora y fila de saldo final", () => {
+    const texto = ["Cuenta SIMPLICITY;;;;;;", "Periodo: 01/10/2026 al 31/10/2026;;;;;;", "FECHA OPERACIÓN;HORA;CONCEPTO;REFERENCIA;CARGO;ABONO;SALDO",
+      "01/10/2026;09:12;COMPRA OXXO GAS 0432 MEX;0000123;$50.00;$0.00;$9,950.00", "03/10/2026;00:00;SPEI RECIBIDO NOMINA EMPRESA SA DE CV;7781234;$0.00;$11,652.00;$21,602.00",
+      "08/10/2026;13:40;PAGO TARJETA AMEX;5550001;$5,000.00;$0.00;$16,602.00", "11/10/2026;19:05;RETIRO CAJERO ATM 0012;0;$1,500.00;$0.00;$15,102.00", "SALDO FINAL;;;;;;$15,102.00"].join("\r\n");
+    const r = csv(texto);
+    assert.deepStrictEqual([r.mapeo.fecha, r.mapeo.desc, r.mapeo.cargo, r.mapeo.abono, r.mapeo.saldo, r.mapeo.id, r.mapeo.inicio], [0, 2, 4, 5, 6, 3, 3]);
+    assert.deepStrictEqual(r.movs.map(m => [m.fecha, m.tipo, m.monto]), [["2026-10-01", "Egreso", 50], ["2026-10-03", "Ingreso", 11652], ["2026-10-08", "Egreso", 5000], ["2026-10-11", "Egreso", 1500]]);
+    assert.strictEqual(r.movs[0].idBanco, "0000123"); assert.strictEqual(r.errores.length, 0); assert.strictEqual(r.omitidas, 1);
+    const R = conc(r.movs, [fila("a", "2026-10-01", "gasolina", 50)]);
+    assert.strictEqual(R.registrados.length, 1); assert.strictEqual(R.faltantes.length, 1); assert.strictEqual(R.faltantes[0].b.tipo, "Ingreso");
+    assert.deepStrictEqual(R.traspasos.map(x => x.regla).sort(), ["efectivo", "pagoTarjeta"]);
+  });
+  await t("AMEX (crédito): cargos en positivo en una sola columna Importe, referencia como id, pago recibido como traspaso", () => {
+    const texto = ["Fecha,Descripción,Titular de la Tarjeta,Cuenta #,Importe,Referencia,Categoría",
+      "02/10/2026,AMAZON MX MEXICO,HERIBERTO I,-31002,\"1,299.00\",'320262750001,Compras", "05/10/2026,UBER TRIP CIUDAD DE MEX,HERIBERTO I,-31002,87.00,'320262780002,Transporte",
+      "09/10/2026,PAGO RECIBIDO - GRACIAS,HERIBERTO I,-31002,\"-5,000.00\",'320262820003,", "12/10/2026,STARBUCKS COFFEE,HERIBERTO I,-31002,95.00,'320262850004,Restaurantes"].join("\n");
+    const rows = CZ.parseCSV(texto), det = CZ.detectarColumnas(rows);
+    assert.deepStrictEqual([det.mapeo.fecha, det.mapeo.desc, det.mapeo.monto, det.mapeo.id, det.mapeo.cargo, det.mapeo.abono, det.mapeo.tipoCol], [0, 1, 4, 5, null, null, null]);
+    let r = CZ.normalizar(rows, det.mapeo, { cuenta: "AMEX" });
+    assert.strictEqual(CZ.sugerirInvertir(det.mapeo, r.movs, "AMEX"), true);   // la app lo propone y lo muestra en “Revisa cómo se leyó”
+    det.mapeo.invertir = true; r = CZ.normalizar(rows, det.mapeo, { cuenta: "AMEX" });
+    assert.deepStrictEqual(r.movs.map(m => [m.tipo, m.monto]), [["Egreso", 1299], ["Egreso", 87], ["Ingreso", 5000], ["Egreso", 95]]);
+    assert.ok(r.movs[0].idBanco.includes("320262750001"));
+    const R = CZ.conciliar({ banco: r.movs, app: CZ.prepararApp([fila("a", "2026-10-02", "amazon", 1299, "Egreso", { cuenta: "AMEX" })]), cuenta: "AMEX", cuentas: CUENTAS, tol: 3 });
+    assert.strictEqual(R.registrados.length, 1); assert.strictEqual(R.traspasos.length, 1); assert.strictEqual(R.traspasos[0].regla, "pagoTarjeta"); assert.strictEqual(R.faltantes.length, 2);
+  });
+  await t("encabezados: “Cargo/Abono” es el tipo, no el importe; la descripción se busca por contenido aunque coincida con el índice de la primera fila", () => {
+    const rows = [["Banco X"], ["Cuenta 1234"], ["Fecha", "Importe", "Cargo/Abono", "Texto"], ["01/10/2026", "50.00", "Cargo", "OXXO GAS"], ["02/10/2026", "11652.00", "Abono", "NOMINA"], ["03/10/2026", "87.00", "Cargo", "UBER"]];
+    const { mapeo } = CZ.detectarColumnas(rows);
+    assert.deepStrictEqual([mapeo.fecha, mapeo.monto, mapeo.tipoCol, mapeo.desc, mapeo.cargo, mapeo.inicio], [0, 1, 2, 3, null, 3]);
+    assert.deepStrictEqual(CZ.normalizar(rows, mapeo, { cuenta: "X" }).movs.map(x => x.tipo), ["Egreso", "Ingreso", "Egreso"]);
+  });
+  await t("sin encabezado: cargo y abono con filas parecidas se distinguen por exclusión; importe y saldo no se confunden; una referencia de 5 dígitos no es fecha", () => {
+    const ca = [["01/10/2026", "OXXO", "50.00", ""], ["02/10/2026", "NOMINA", "", "11652.00"], ["03/10/2026", "UBER", "87.00", ""], ["04/10/2026", "VENTA", "", "300.00"], ["05/10/2026", "CINE", "200.00", ""], ["06/10/2026", "DEVOLUCION", "", "120.00"]];
+    const m1 = CZ.detectarColumnas(ca).mapeo;
+    assert.deepStrictEqual([m1.fecha, m1.desc, m1.cargo, m1.abono, m1.monto], [0, 1, 2, 3, null]);
+    const ms = [["01/10/2026", "OXXO", "-50.00", "9950.00"], ["02/10/2026", "NOMINA", "11652.00", ""], ["03/10/2026", "UBER", "-87.00", "21515.00"], ["04/10/2026", "CINE", "-200.00", "21315.00"]];
+    const m2 = CZ.detectarColumnas(ms).mapeo;
+    assert.deepStrictEqual([m2.fecha, m2.desc, m2.monto, m2.saldo, m2.cargo], [0, 1, 2, 3, null]);
+    const ref = [["12345", "01/10/2026", "OXXO", "-50.00"], ["23456", "02/10/2026", "UBER", "-87.00"], ["34567", "03/10/2026", "NOMINA", "11652.00"]];
+    const m3 = CZ.detectarColumnas(ref).mapeo;
+    assert.deepStrictEqual([m3.fecha, m3.desc, m3.monto], [1, 2, 3]);
   });
   await t("vincular a mano: cercanos ordenados por diferencia de importe y fecha", () => {
     const b = banco(["05/10/2026,ALGO,500.00,"])[0];
@@ -300,6 +354,10 @@ module.exports = async function () {
     const pago = R2.traspasos[0].b;
     ui2.click({ dataset: { cz: "ignorar", h: pago.huella } }); assert.strictEqual(ui2.resultado().ignorados.length, 1);
     ui2.click({ dataset: { cz: "deshacer", h: pago.huella } }); assert.strictEqual(ui2.resultado().ignorados.length, 0);
+    // “Sí es un gasto” lo pasa a Faltantes con la opción de regresarlo; nunca lo registra solo
+    ui2.click({ dataset: { cz: "normal", h: pago.huella } });
+    assert.strictEqual(ui2.resultado().faltantes.length, 1); assert.strictEqual(ui2.resultado().traspasos.length, 0); assert.ok(ui2.view().includes("Es traspaso")); assert.strictEqual(api.S.movs.length, 4);
+    ui2.click({ dataset: { cz: "deshacer", h: pago.huella } }); assert.strictEqual(ui2.resultado().traspasos.length, 1);
     ui2.click({ dataset: { cz: "cancelar" } }); assert.strictEqual(ui2._U.etapa, "cargar");
     const btn = { dataset: { cz: "limpiar" }, textContent: "" };
     ui2.click(btn); assert.strictEqual(Object.keys(ui2.estado().decisiones).length, 3);
@@ -319,6 +377,10 @@ module.exports = async function () {
     ui.cargarArchivo({ name: "foto.xlsx", arrayBuffer: () => Promise.resolve(new Uint8Array(10).buffer) });
     await new Promise(r => setTimeout(r, 20));
     assert.ok(ui._U.msg.includes("No se pudo leer")); assert.ok(ui.view().includes("No se pudo leer"));
+    // Fechas futuras (mes/día al revés) se avisan antes de conciliar; el botón de conciliar sigue pidiendo revisión
+    ui.cargarArchivo({ name: "futuro.csv", arrayBuffer: () => Promise.resolve(new TextEncoder().encode("Fecha,Concepto,Cargo,Abono\n01/01/2099,X,1.00,").buffer) });
+    await new Promise(r => setTimeout(r, 20));
+    assert.ok(ui.view().includes("en el futuro") && ui.view().includes("Conciliar 1 movimiento"));
   });
   return n;
 };
