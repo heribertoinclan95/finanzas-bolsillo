@@ -2,7 +2,7 @@
    Cada vez que cambies archivos de la app, sube VERSION para que el iPhone baje la nueva.
    Seguridad: nunca intercepta /api/ (Worker) ni /cdn-cgi/ (Cloudflare Access) y solo guarda en caché
    respuestas completas y sin redirección; así el login de Access jamás se guarda como si fuera la app. */
-const VERSION = "v7";   // conciliación integrada: la versión sube al integrar cada rama
+const VERSION = "v8";   // candado visual; la versión sube al integrar cada rama
 const CACHE = "finanzas-" + VERSION;
 const ARCHIVOS = ["./", "index.html", "styles.css", "app.js", "conciliacion.js", "conciliacion-ui.js", "manifest.webmanifest",
   "icons/apple-touch-icon.png", "icons/icon-192.png", "icons/icon-512.png"];

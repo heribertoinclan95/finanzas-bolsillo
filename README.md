@@ -11,6 +11,7 @@ App para iPhone para registrar gastos e ingresos personales y mandarlos a la hoj
 - **Más:** manda los pendientes directo a Google Sheets o copia las filas para pegarlas; ahí viven también la meta de inversión, cuentas, categorías y el respaldo.
 - **Conciliar (en Más):** carga el CSV o Excel de tu banco y la app separa lo que ya registraste, lo que te faltó, lo dudoso y lo que solo está en la app. Registras los faltantes con un toque, sin duplicar.
 - **Respaldo:** descarga y restaura un archivo `.json` con todo.
+- **Candado al abrir (opcional):** una contraseña que se pide al abrir la app y al volver tras 5 minutos; Bitwarden la autollena. Es un candado visual para que nadie abra la app con tu teléfono en la mano; no cifra los datos.
 
 Tus movimientos se guardan **en el iPhone** (y en tu hoja si conectas el Apps Script). Nada de tus datos se sube a este repo.
 

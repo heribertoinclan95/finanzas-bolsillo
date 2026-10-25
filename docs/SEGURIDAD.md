@@ -140,6 +140,17 @@ respaldo `CLAVE_RESPALDO`.
 - Forzar sesión vencida (Zero Trust → Logs → Users → Revoke) y comprobar el flujo de "Entrar" con pendientes.
 - Que la CSP no bloquee nada: abrir la app en Safari de la Mac con el inspector conectado al iPhone y revisar la consola.
 
+## Candado visual al abrir (Más › Ajustes)
+
+Opcional. Una contraseña validada en el teléfono (PBKDF2 con sal, 100 000 iteraciones, WebCrypto) que se pide al abrir la app y al
+volver tras 5 minutos en segundo plano. El formulario lleva usuario y contraseña estándar para que Bitwarden la guarde y la autollene.
+
+- Es un **candado visual**: evita que alguien con tu teléfono en la mano abra la app. **No cifra los datos**: lo guardado lo protege
+  el bloqueo del iPhone y la entrada desde internet la protege Cloudflare Access. Access sigue igual con o sin candado.
+- El hash nunca va en el respaldo; el candado es de cada teléfono.
+- Si olvidas la contraseña y no está en Bitwarden: borra la app de la pantalla de inicio y vuelve a instalarla. Pierdes solo lo
+  capturado y no enviado; la hoja es la fuente de verdad. Por eso conviene mandar los pendientes antes de activarlo.
+
 ## Cómo revertir
 
 - Si Access da problemas: Workers & Pages → `finanzas-bolsillo` → Access → desactivar la protección. La app sigue

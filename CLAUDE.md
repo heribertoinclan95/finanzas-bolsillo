@@ -25,6 +25,8 @@ Configuración (`S.cfg`, misma clave): `v` (versión, hoy 3), `cuentas[]`, `cate
 - `inversion.pct` es el % vigente (lo usa Inicio). `reparto: [[nombre, fracción]]` es la distribución objetivo. `instrumentos: {nombre: [palabras]}` clasifica cada inversión por palabra completa en la descripción (sin coincidencia → "Sin clasificar"; dos o más → "Por revisar", nunca se asigna a ciegas). `metas: [{desde: "aaaa-mm", pct}]` registra desde qué mes aplica cada %; los meses anteriores al primer registro usan ese primer % y se marcan como **estimados** en pantalla.
 - `ensureInversion()` completa lo que falte en `cfg.inversion` sin depender de `cfg.v` y es idempotente: así convive con otras migraciones (seguridad también sube `cfg.v`). Al cambiar el % en Ajustes, `registrarMeta()` agrega o corrige la entrada del mes en curso y nunca reescribe meses anteriores.
 
+`cfg.candado` (`{ hash, sal, iter }` o `null`) es el candado visual de Más › Ajustes: contraseña validada en el teléfono con PBKDF2 (WebCrypto), pedida al abrir y al volver tras 5 minutos en segundo plano (`bloquear`/`desbloquear`, `S.bloqueada`; `render()` no pinta nada mientras esté puesto). Es un candado visual, no cifra los datos; nunca va en el respaldo. El formulario lleva usuario + contraseña estándar para que Bitwarden lo autollene.
+
 Copia de la hoja (`S.datos`, clave `finanzas-bolsillo-datos`, se puede borrar y volver a leer): `{ leido: ISO, filas: [[fecha, desc, cat, cantidad, tipo, cuenta]] }`.
 
 Los dashboards usan `filas()`: filas de la hoja + capturas no enviadas + capturas enviadas después de la última lectura (`enviado > leido`). Así nada se cuenta doble.

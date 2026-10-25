@@ -35,7 +35,8 @@ const DEFAULT_CFG = {
   // metas: desde qué mes aplica cada % objetivo; se llena en ensureInversion() y crece al cambiar el % en Ajustes.
   inversion: { pct: 0.20, reparto: [["NU", 0.6], ["GBM", 0.2], ["Bitcoin", 0.2]],
     instrumentos: { "NU": ["nu"], "GBM": ["gbm"], "Bitcoin": ["bitcoin", "bitso", "btc"], "CETES": ["cetes", "cetesdirecto"] }, metas: [] },
-  sync: { modo: "worker", url: "", clave: "" }   // modo: "worker" (por el Worker protegido) · "directo" (transición: URL y clave en el cel)
+  sync: { modo: "worker", url: "", clave: "" },  // modo: "worker" (por el Worker protegido) · "directo" (transición: URL y clave en el cel)
+  candado: null                                   // { hash, sal, iter }: candado visual al abrir (Más › Ajustes); null = sin candado
 };
 const LKEY = "finanzas-bolsillo-v1";
 const DKEY = "finanzas-bolsillo-datos";
@@ -58,6 +59,7 @@ const S = {
   tab: "inicio", ym: today().slice(0, 7), filter: "Todos", buscar: "",
   expScope: "pend", sending: false, leyendo: false, mas: "hoja", confirmarBorrado: false,
   sesion: { estado: "desconocido", email: "", vence: 0 },   // sesión de Cloudflare Access: desconocido · activa · vencida · sin-worker
+  bloqueada: false, abrirNuevo: false,                      // candado visual puesto · "?nuevo" pendiente hasta abrirlo
   an: { vista: "resumen", anio: String(new Date().getFullYear()), mes: 0, cat: "Comida", metrica: "Egreso" }
 };
 
@@ -871,7 +873,8 @@ function masAjustes() {
     </form>
   </section>
   ${cfgCard("Cuentas", "cuentas")}
-  ${cfgCard("Categorías de gasto", "categorias")}`;
+  ${cfgCard("Categorías de gasto", "categorias")}
+  ${cardCandado()}`;
 }
 function masRespaldo() {
   return `<section class="card"><h3>Respaldo</h3>
@@ -890,9 +893,70 @@ function cfgCard(title, key) {
   <form class="addrow" data-add="${key}"><input id="add-${key}" placeholder="Agregar…" autocomplete="off"><button class="btn ghost small">Agregar</button></form></section>`;
 }
 
+/* ---------- Candado visual (Más › Ajustes) ----------
+   Contraseña validada en este teléfono con PBKDF2 (WebCrypto); se pide al abrir y al volver tras CANDADO_MS en
+   segundo plano. Evita que alguien abra la app con tu cel en la mano. NO cifra los datos: lo guardado lo protege
+   el bloqueo del iPhone y la entrada desde internet la protege Cloudflare Access. Bitwarden lo autollena porque
+   el formulario lleva usuario + contraseña estándar. El hash nunca va en el respaldo. */
+const CANDADO_MS = 5 * 60e3, CANDADO_ITER = 100000;
+const subtle = () => (typeof crypto !== "undefined" && crypto.subtle) || null;
+const aB64 = u8 => btoa(String.fromCharCode(...u8));
+const deB64 = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
+async function hashCandado(pass, salB64, iter = CANDADO_ITER) {
+  const sal = salB64 ? deB64(salB64) : crypto.getRandomValues(new Uint8Array(16));
+  const key = await subtle().importKey("raw", new TextEncoder().encode(String(pass).normalize("NFKC")), "PBKDF2", false, ["deriveBits"]);
+  const bits = await subtle().deriveBits({ name: "PBKDF2", hash: "SHA-256", salt: sal, iterations: iter }, key, 256);
+  return { hash: aB64(new Uint8Array(bits)), sal: aB64(sal), iter };
+}
+async function verificarCandado(pass, c) { return !c || !c.hash || (await hashCandado(pass, c.sal, c.iter || CANDADO_ITER)).hash === c.hash; }
+const debeBloquear = (desde, ahora) => desde > 0 && ahora - desde >= CANDADO_MS;
+const campoUsuario = () => `<input class="sr" name="usuario" autocomplete="username" value="finanzas" readonly aria-hidden="true" tabindex="-1">`;
+function viewLock() {
+  return `<div class="lock" role="dialog" aria-modal="true" aria-label="Candado"><form class="lockbox" id="lockForm">
+    <div class="brand">Finanzas<small>Candado</small></div>
+    <p class="note">Escribe tu contraseña para abrir.</p>
+    ${campoUsuario()}
+    <input id="lockPass" type="password" autocomplete="current-password" placeholder="Contraseña" aria-label="Contraseña" autofocus>
+    <button class="btn acc" type="submit">Entrar</button>
+  </form></div>`;
+}
+function bloquear() { S.bloqueada = true; $("#main").innerHTML = ""; $("#lockHost").innerHTML = viewLock(); const i = $("#lockPass"); if (i) i.focus(); }
+function desbloquear() { S.bloqueada = false; $("#lockHost").innerHTML = ""; render(); if (S.abrirNuevo) { S.abrirNuevo = false; openSheet(null); } }
+function cardCandado() {
+  if (!subtle()) return "";
+  const activo = !!(S.cfg.candado && S.cfg.candado.hash);
+  return `<section class="card"><h3>Candado al abrir</h3>
+    <p class="note">${activo ? "Activo: se pide la contraseña al abrir la app y al volver tras 5 minutos en segundo plano." : "Pide una contraseña al abrir la app. Guárdala en Bitwarden para que la autollene."} Es un candado visual: evita que alguien abra la app con tu teléfono en la mano; no cifra los datos.</p>
+    <form class="stack" id="candadoForm" style="margin-top:10px">
+      ${campoUsuario()}
+      ${activo ? `<div class="field"><span class="label">Contraseña actual</span><input id="candadoActual" type="password" autocomplete="current-password"></div>
+      <div class="field"><span class="label">Nueva contraseña (opcional)</span><input id="candadoNueva" type="password" autocomplete="new-password" placeholder="Mínimo 6 caracteres"></div>
+      <div class="btns"><button class="btn small" type="submit">Cambiar</button><button class="btn ghost small" type="button" id="quitarCandadoBtn">Quitar candado</button></div>`
+      : `<div class="field"><span class="label">Contraseña</span><input id="candadoNueva" type="password" autocomplete="new-password" placeholder="Mínimo 6 caracteres"></div>
+      <div class="field"><span class="label">Repítela</span><input id="candadoRepite" type="password" autocomplete="new-password"></div>
+      <button class="btn small" type="submit">Activar candado</button>`}
+    </form></section>`;
+}
+async function guardarCandado(quitar) {
+  const activo = !!(S.cfg.candado && S.cfg.candado.hash);
+  if (activo) {
+    if (!(await verificarCandado($("#candadoActual").value, S.cfg.candado))) { toast("La contraseña actual no coincide"); return; }
+    if (quitar) { S.cfg.candado = null; persist(); render(); toast("Candado quitado"); return; }
+    const nueva = $("#candadoNueva").value;
+    if (nueva.length < 6) { toast("La nueva contraseña necesita 6 caracteres o más"); return; }
+    S.cfg.candado = await hashCandado(nueva); persist(); render(); toast("Contraseña cambiada");
+    return;
+  }
+  const nueva = $("#candadoNueva").value, rep = $("#candadoRepite").value;
+  if (nueva.length < 6) { toast("Usa 6 caracteres o más"); return; }
+  if (nueva !== rep) { toast("Las dos contraseñas no coinciden"); return; }
+  S.cfg.candado = await hashCandado(nueva); persist(); render(); toast("Candado activado");
+}
+
 /* ---------- Render ---------- */
 const TITLES = { movs: "Movimientos", analisis: "Análisis", mas: "Más" };
 function render() {
+  if (S.bloqueada) { $("#main").innerHTML = ""; return; }   // con el candado puesto no se pinta nada
   tipSvg = null;
   const conMes = S.tab === "movs" && !S.buscar.trim();
   $(".monthnav").hidden = !conMes;
@@ -1069,8 +1133,8 @@ async function readSheet(silencioso) {
 }
 
 /* ---------- Respaldo ---------- */
-/* El respaldo nunca lleva la URL ni la clave del Apps Script. */
-const respaldoJSON = () => ({ app: "finanzas-bolsillo", version: 2, fecha: new Date().toISOString(), movs: S.movs, cfg: { ...S.cfg, sync: { ...DEFAULT_CFG.sync, modo: S.cfg.sync.modo } } });
+/* El respaldo nunca lleva la URL ni la clave del Apps Script, ni el candado (es de este teléfono). */
+const respaldoJSON = () => ({ app: "finanzas-bolsillo", version: 2, fecha: new Date().toISOString(), movs: S.movs, cfg: { ...S.cfg, sync: { ...DEFAULT_CFG.sync, modo: S.cfg.sync.modo }, candado: null } });
 function backup() {
   const blob = new Blob([JSON.stringify(respaldoJSON(), null, 1)], { type: "application/json" });
   const a = document.createElement("a");
@@ -1165,6 +1229,7 @@ $("#main").addEventListener("click", async e => {
   }
   if (t.id === "loginBtn") location.assign("api/entrar");           // Access pide el código y regresa a la app
   if (t.id === "backupBtn") backup();
+  if (t.id === "quitarCandadoBtn") guardarCandado(true);
 });
 // Gráficas: tocar o arrastrar muestra el valor. Con mouse se oculta al salir; en táctil se queda hasta tocar fuera.
 $("#main").addEventListener("pointerdown", e => {
@@ -1210,20 +1275,32 @@ $("#main").addEventListener("submit", e => {
     persist(); render(); toast("Meta guardada");
     return;
   }
+  if (e.target.id === "candadoForm") { guardarCandado(false); return; }
   const f = e.target.closest("[data-add]"); if (!f) return;
   const k = f.dataset.add, inp = f.querySelector("input"), v = inp.value.trim();
   if (v && !S.cfg[k].includes(v)) { S.cfg[k] = [...S.cfg[k], v]; persist(); render(); toast("Agregado: " + v); }
   else inp.value = "";
 });
 document.addEventListener("keydown", e => { if (e.key === "Escape" && draft) closeSheet(); });
-document.addEventListener("visibilitychange", () => { if (!document.hidden && datosViejos()) readSheet(true); });
+let ocultoDesde = 0;
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) { ocultoDesde = Date.now(); return; }
+  if (S.cfg.candado && !S.bloqueada && debeBloquear(ocultoDesde, Date.now())) bloquear();   // volvió tras 5 min en segundo plano
+  if (datosViejos()) readSheet(true);
+});
+$("#lockHost").addEventListener("submit", async e => {
+  e.preventDefault();
+  const inp = $("#lockPass");
+  if (await verificarCandado(inp.value, S.cfg.candado)) desbloquear();
+  else { toast("Contraseña incorrecta"); inp.value = ""; inp.focus(); }
+});
 const datosViejos = () => !S.datos || (Date.now() - new Date(S.datos.leido)) > 3 * 36e5;
 
 // Arranque
 if (CZU) CZU.init({ S, esc, fmt, fmtC, ddmmaa, fechaHora, filas, guessCat, openSheet, addMov, toast, render, today });
 load();
-render();
-if (new URLSearchParams(location.search).has("nuevo")) openSheet(null);
+if (S.cfg.candado && subtle()) bloquear(); else render();
+if (new URLSearchParams(location.search).has("nuevo")) { if (S.bloqueada) S.abrirNuevo = true; else openSheet(null); }
 if (datosViejos()) readSheet(true);
 revisarSesion(true);
 // El service worker se registra aquí y no en index.html: la CSP de _headers no permite scripts en línea.
@@ -1231,5 +1308,6 @@ if ("serviceWorker" in navigator) window.addEventListener("load", () => navigato
 
 // Funciones puras para pruebas en Node
 if (typeof module !== "undefined") module.exports = { parseQuick, toRow, toTSV, normTipo, normCat, S, filas, migrate, margen, promIngresos3m, resumenMes, explicaMargen, viewInicio, lineChart, colChart, barsH, sendPending, render, callScript, respaldoJSON, revisarSesion, conectada, modoWorker,
-  ensureInversion, candidatosInstrumento, instrumento, registrarMeta, pctObjetivo, inversionMes, distribucion, historialInversion, parseInstrumentos, anInversion, addMov };
+  ensureInversion, candidatosInstrumento, instrumento, registrarMeta, pctObjetivo, inversionMes, distribucion, historialInversion, parseInstrumentos, anInversion, addMov,
+  hashCandado, verificarCandado, debeBloquear, viewLock, bloquear, desbloquear };
 })();

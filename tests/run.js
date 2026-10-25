@@ -20,7 +20,8 @@ function cargar(store = {}, red) {
     navigator: { onLine: false },
     localStorage: { getItem: k => store[k] ?? null, setItem: (k, v) => { store[k] = v; } },
     location: { search: "" },
-    setTimeout, clearTimeout, fetch: red || (() => Promise.reject(new Error("sin red")))
+    setTimeout, clearTimeout, fetch: red || (() => Promise.reject(new Error("sin red"))),
+    crypto: globalThis.crypto, TextEncoder, btoa, atob                // candado visual (PBKDF2 con WebCrypto)
   };
   vm.createContext(ctx);
   vm.runInContext(fs.readFileSync(path.join(__dirname, "..", "app.js"), "utf8"), ctx);
@@ -418,6 +419,35 @@ const t = async (name, fn) => { await fn(); n++; console.log("✓", name); };
     const wr = fs.readFileSync(path.join(__dirname, "..", "wrangler.jsonc"), "utf8");
     assert.ok(!/"vars"/.test(wr), "wrangler.jsonc no debe llevar secretos en vars"); assert.ok(/run_worker_first/.test(wr));
     assert.ok(!/<script>/.test(fs.readFileSync(path.join(__dirname, "..", "index.html"), "utf8")), "index.html sin scripts en línea (CSP)");
+  });
+
+  /* ---- Candado visual ---- */
+  await t("candado visual: PBKDF2 con sal, verifica la contraseña, respaldo sin candado y formulario que Bitwarden reconoce", async () => {
+    const { api: a } = cargar(conMovs([mov("a", "2026-10-01", "x", "Comida", 10)]));
+    assert.strictEqual(a.S.bloqueada, false); assert.strictEqual(a.S.cfg.candado, null);
+    const c = await a.hashCandado("secreta123");
+    assert.ok(c.hash && c.sal && c.iter >= 100000);
+    assert.strictEqual(await a.verificarCandado("secreta123", c), true);
+    assert.strictEqual(await a.verificarCandado("otra", c), false);
+    assert.strictEqual(await a.verificarCandado("x", null), true);                       // sin candado: abierto
+    const c2 = await a.hashCandado("secreta123");
+    assert.notStrictEqual(c2.sal, c.sal); assert.notStrictEqual(c2.hash, c.hash);        // sal distinta cada vez
+    a.S.cfg.candado = c;
+    assert.strictEqual(a.respaldoJSON().cfg.candado, null); assert.strictEqual(a.respaldoJSON().movs.length, 1);
+    const ahora = Date.now();
+    assert.strictEqual(a.debeBloquear(ahora - 4 * 60e3, ahora), false);
+    assert.strictEqual(a.debeBloquear(ahora - 6 * 60e3, ahora), true);
+    assert.strictEqual(a.debeBloquear(0, ahora), false);
+    const html = a.viewLock();
+    assert.ok(html.includes('autocomplete="current-password"') && html.includes('autocomplete="username"') && html.includes('type="password"'));
+  });
+  await t("con candado guardado la app arranca bloqueada, no pinta movimientos y abre al desbloquear", async () => {
+    const c = await cargar().api.hashCandado("secreta123");
+    const { api: a } = cargar({ [LKEY]: JSON.stringify({ movs: [mov("a", "2026-10-01", "x", "Comida", 10)], cfg: { v: 3, candado: c } }) });
+    assert.strictEqual(a.S.bloqueada, true); assert.strictEqual(a.S.cfg.candado.hash, c.hash);
+    assert.strictEqual(a.S.movs.length, 1);                                               // los datos siguen ahí, solo no se pintan
+    a.desbloquear(); assert.strictEqual(a.S.bloqueada, false);
+    a.bloquear(); assert.strictEqual(a.S.bloqueada, true);
   });
 
   /* ---- Worker: puente protegido /api/* con JWT de Cloudflare Access ---- */
