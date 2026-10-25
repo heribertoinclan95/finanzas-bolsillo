@@ -166,7 +166,29 @@ function resumenMes(ym, hoy) {
   const prom = esActual ? promIngresos3m(all, ym) : null;
   const estimado = prom && ingresos < prom ? { ingresos: prom, ...margen(prom, consumo, inversion, pctMeta) } : null;
   const ultimos = all.map((r, i) => [r, i]).sort((a, b) => b[0].fecha.localeCompare(a[0].fecha) || b[1] - a[1]).slice(0, 5).map(a => a[0]);
-  return { ym, y, mo, ingresos, gastos, inversion, consumo, pctMeta, ...m, esActual, diasMes, diaHoy, diasRestantes, diario, estimado, ultimos, n: ms.length };
+  const nIng = ms.filter(r => r.tipo === "Ingreso").length;
+  // De dónde viene cada movimiento del mes: filas de la hoja o capturas del cel (y cuántas faltan por enviar).
+  const origen = { hoja: ms.filter(r => !r.local).length, local: ms.filter(r => r.local).length, pend: ms.filter(r => r.pendiente).length };
+  return { ym, y, mo, ingresos, gastos, inversion, consumo, pctMeta, ...m, esActual, diasMes, diaHoy, diasRestantes, diario, estimado, ultimos, n: ms.length, nIng, origen };
+}
+// Cuenta compacta de Inicio: cada paso con su monto (ya con signo, suman el total) y la causa del resultado en una frase.
+function explicaMargen(r) {
+  const mes = MESES[r.mo - 1], pct = Math.round(r.pctMeta * 100) + "%", sinIng = r.ingresos <= 0, antes = r.ingresos - r.consumo;
+  const apartado = r.reserva <= 0 ? "Apartado para inversión" : r.inversion >= r.meta ? "Inversión ya hecha" : `Meta de inversión (${pct})`;
+  const pasos = [
+    { k: "ingresos", label: "Ingresos recibidos", monto: r.ingresos },
+    { k: "consumo", label: r.inversion > 0 ? "Gastos sin inversión" : "Gastos", monto: -r.consumo },
+    { k: "reserva", label: apartado, monto: -r.reserva },
+    { k: "disponible", label: "Disponible", monto: r.disponible, total: true }
+  ];
+  let causa;
+  if (!r.n) causa = `Sin movimientos en ${mes}.`;
+  else if (sinIng && r.consumo > 0) causa = `Sin ingresos registrados en ${mes}: todo lo gastado queda en negativo. Si ya cobraste, captúralo con +.`;
+  else if (sinIng) causa = `Sin ingresos registrados en ${mes}; se descuenta lo que invertiste.`;
+  else if (r.disponible < 0 && antes >= 0) causa = `Ibas ${fmt.format(antes)} a favor; los ${fmt.format(r.reserva)} apartados para inversión te dejan en negativo.`;
+  else if (r.disponible < 0) causa = `Gastaste ${fmt.format(-antes)} más de lo que entró, sin contar la inversión. Es según tus registros, no tu saldo bancario.`;
+  else causa = `Margen de ${mes} según tus registros, no tu saldo bancario.`;
+  return { causa, pasos };
 }
 
 /* ---------- Captura rápida estilo WhatsApp ---------- */
@@ -328,10 +350,11 @@ function viewInicio() {
   if (!filas().length) return emptyState(ym) + syncHint();
   const r = resumenMes(ym), mes = MESES[r.mo - 1], neg = r.disponible < 0, pctTxt = Math.round(r.pctMeta * 100) + "%";
   const dinero = v => (v < 0 ? "−" : "") + fmt.format(Math.abs(v));
+  const ex = explicaMargen(r);
   let hint;
   if (!r.n) hint = `Sin movimientos en ${mes}. Toca <b>+</b> para registrar el primero.`;
-  else if (neg) hint = `Gastaste ${fmt.format(-r.disponible)} más que tu margen de ${mes}. Es según tus registros, no tu saldo bancario.`;
-  else hint = `Margen de ${mes} según tus registros, no tu saldo bancario.` + (r.esActual && r.disponible > 0 ? ` ${r.diasRestantes === 1 ? "Último día" : `Quedan ${r.diasRestantes} días`}: <b class="num">${fmt.format(r.diario)}</b> al día.` : "");
+  else if (neg) hint = ex.causa;
+  else hint = ex.causa + (r.esActual && r.disponible > 0 ? ` ${r.diasRestantes === 1 ? "Último día" : `Quedan ${r.diasRestantes} días`}: <b class="num">${fmt.format(r.diario)}</b> al día.` : "");
   const est = r.estimado ? `<p class="est"><span class="tag-est">Estimado</span><span>Con tu ingreso habitual de ${fmt.format(r.estimado.ingresos)}, el margen sería <b class="num">${dinero(r.estimado.disponible)}</b>. Arriba solo cuenta lo ya cobrado.</span></p>` : "";
   const avance = r.meta > 0 ? Math.min(1, r.inversion / r.meta) : r.inversion > 0 ? 1 : 0;
   const metaTxt = r.meta <= 0 && r.inversion <= 0 ? `Meta: ${pctTxt} de tus ingresos. Se calcula al registrar ingresos.`
@@ -339,14 +362,15 @@ function viewInicio() {
     : r.metaCumplida ? `Meta del ${pctTxt} cumplida${r.inversion > r.meta ? `, con ${fmt.format(r.inversion - r.meta)} extra` : ""}.`
     : `Meta del ${pctTxt}: faltan ${fmt.format(r.faltaMeta)}.`;
   const pend = S.movs.filter(m => !m.exportado).length, conectado = !!(S.cfg.sync.url && S.cfg.sync.clave);
+  // Cuenta compacta bajo el número y, en una línea, de dónde salen los datos (hoja o cel).
+  const o = r.origen, fila = p => `<div class="paso${p.total ? " total" : ""}"><span>${p.label}</span><span class="num${p.total ? (neg ? " neg" : "") : p.monto > 0 ? " in" : ""}">${p.monto < 0 ? "−" : ""}${fmt.format(Math.abs(p.monto))}</span></div>`;
+  const fuente = !r.n ? "" : `${r.n} movimiento${r.n === 1 ? "" : "s"}: ` + [S.datos ? `${o.hoja} de la hoja` : "", o.local ? `${o.local} de este cel${o.pend ? ` (${o.pend} sin enviar)` : ""}` : ""].filter(Boolean).join(" · ")
+    + (!S.datos ? " · hoja sin leer" : datosViejos() ? " · hoja de hace más de 3 h" : "");
   return `<section class="hero">
     <div class="label">Disponible para gastar</div>
     <div class="big${neg ? " neg" : ""}">${dinero(r.disponible)}</div>
     <p class="hint">${hint}</p>${est}
-    <div class="split">
-      <div class="pill in"><span class="label">Ingresos recibidos</span><span class="v num">${fmt.format(r.ingresos)}</span></div>
-      <div class="pill out"><span class="label">Gastos</span><span class="v num">${fmt.format(r.gastos)}</span>${r.inversion > 0 ? `<small class="sub">${fmt.format(r.inversion)} son inversión</small>` : ""}</div>
-    </div>
+    ${r.n ? `<div class="cuenta">${ex.pasos.map(fila).join("")}</div><p class="fuente">${fuente}</p>` : ""}
   </section>
   <section class="card goal">
     <div class="rowhead"><h3>Inversión</h3><span class="num">${fmt.format(r.inversion)}${r.meta > 0 ? ` <span class="muted">de ${fmt.format(r.meta)}</span>` : ""}</span></div>
@@ -910,5 +934,5 @@ if (new URLSearchParams(location.search).has("nuevo")) openSheet(null);
 if (datosViejos()) readSheet(true);
 
 // Funciones puras para pruebas en Node
-if (typeof module !== "undefined") module.exports = { parseQuick, toRow, toTSV, normTipo, normCat, S, filas, migrate, margen, promIngresos3m, resumenMes, lineChart, colChart, barsH, sendPending, render };
+if (typeof module !== "undefined") module.exports = { parseQuick, toRow, toTSV, normTipo, normCat, S, filas, migrate, margen, promIngresos3m, resumenMes, explicaMargen, viewInicio, lineChart, colChart, barsH, sendPending, render };
 })();
