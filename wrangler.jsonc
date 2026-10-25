@@ -1,8 +1,14 @@
-// Cloudflare Workers: publica la carpeta raíz como sitio estático (sin build).
+// Cloudflare Workers: publica la carpeta raíz como sitio estático (sin build) y un Worker pequeño
+// (worker/index.mjs) que atiende /api/* como puente protegido hacia el Apps Script.
+// Los secretos (SCRIPT_URL, SCRIPT_CLAVE, ACCESS_TEAM, ACCESS_AUD, ACCESS_EMAILS) NO van aquí:
+// se cargan con `wrangler secret put` o en el panel (Settings → Variables and Secrets).
 {
   "name": "finanzas-bolsillo",
+  "main": "worker/index.mjs",
   "compatibility_date": "2026-10-01",
   "assets": {
-    "directory": "./"
+    "directory": "./",
+    "binding": "ASSETS",
+    "run_worker_first": ["/api/*"]
   }
 }

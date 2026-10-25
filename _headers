@@ -1,4 +1,13 @@
-# Cloudflare Pages: que el iPhone siempre revise si hay versión nueva de la app
+# Cloudflare Workers (assets estáticos).
+# 1) Cabeceras de seguridad para toda la app. La CSP solo permite scripts propios (por eso no hay <script> en línea),
+#    estilos propios y de Google Fonts, y conexiones al propio Worker (/api) y, mientras dure la transición, al Apps Script.
+# 2) El iPhone siempre revisa si hay versión nueva de la app.
+/*
+  X-Content-Type-Options: nosniff
+  X-Frame-Options: DENY
+  Referrer-Policy: no-referrer
+  Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=()
+  Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self' https://fonts.googleapis.com https://fonts.gstatic.com https://script.google.com https://script.googleusercontent.com; manifest-src 'self'; worker-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'
 /sw.js
   Cache-Control: no-cache
 /
@@ -8,6 +17,10 @@
 /app.js
   Cache-Control: no-cache
 /styles.css
+  Cache-Control: no-cache
+/conciliacion.js
+  Cache-Control: no-cache
+/conciliacion-ui.js
   Cache-Control: no-cache
 /manifest.webmanifest
   Content-Type: application/manifest+json

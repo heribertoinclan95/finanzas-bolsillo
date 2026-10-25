@@ -2,3 +2,7 @@
 node_modules/
 *.json.bak
 finanzas-respaldo-*.json
+datos.json
+datos-*.json
+.wrangler/
+.dev.vars

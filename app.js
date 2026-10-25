@@ -3,12 +3,14 @@
    - S.movs   → lo que capturas en el iPhone (localStorage, clave LKEY)
    - S.datos  → copia de tu Google Sheet (Histórico + Movimientos) para los dashboards (clave DKEY)
    Los dashboards usan filas() = hoja + lo capturado que aún no llega a la hoja.
+   Hoja: callScript() habla con el Worker protegido (/api/hoja); la URL y la clave del Apps Script son secretos del Worker.
+   El modo "directo" (URL y clave en el cel) solo existe mientras dura la transición; se cambia en Más › Google Sheet.
    Pestañas: Inicio (margen del mes en curso) · Movimientos · Análisis (subpestañas) · Más (hoja, conciliar, ajustes, respaldo). */
 (() => {
 "use strict";
 
 /* ---------- Configuración ---------- */
-const CFG_VERSION = 2;
+const CFG_VERSION = 3;
 const CATEGORIAS = ["Comida", "Super", "Transporte", "Salida", "Subscripcion", "Salud", "Renta", "Entretenimiento", "Libros", "Inversion", "Educacion", "Negocio", "SAT", "Otros"];
 const DEFAULT_CFG = {
   v: CFG_VERSION,
@@ -29,8 +31,11 @@ const DEFAULT_CFG = {
     "SAT": ["sat", "impuesto"],
     "Otros": ["ropa", "topps", "apuesta", "regalo"]
   },
-  inversion: { pct: 0.20, reparto: [["NU", 0.6], ["GBM", 0.2], ["Bitcoin", 0.2]] },
-  sync: { url: "", clave: "" }
+  // instrumentos: palabras (completas) que identifican cada instrumento en la descripción. CETES es histórico: tiene reglas pero no % en el reparto.
+  // metas: desde qué mes aplica cada % objetivo; se llena en ensureInversion() y crece al cambiar el % en Ajustes.
+  inversion: { pct: 0.20, reparto: [["NU", 0.6], ["GBM", 0.2], ["Bitcoin", 0.2]],
+    instrumentos: { "NU": ["nu"], "GBM": ["gbm"], "Bitcoin": ["bitcoin", "bitso", "btc"], "CETES": ["cetes", "cetesdirecto"] }, metas: [] },
+  sync: { modo: "worker", url: "", clave: "" }   // modo: "worker" (por el Worker protegido) · "directo" (transición: URL y clave en el cel)
 };
 const LKEY = "finanzas-bolsillo-v1";
 const DKEY = "finanzas-bolsillo-datos";
@@ -51,7 +56,8 @@ const short = v => { const a = Math.abs(v); return (v < 0 ? "−" : "") + (a >= 
 const S = {
   movs: [], cfg: clone(DEFAULT_CFG), datos: null,
   tab: "inicio", ym: today().slice(0, 7), filter: "Todos", buscar: "",
-  expScope: "pend", sending: false, leyendo: false, mas: "hoja",
+  expScope: "pend", sending: false, leyendo: false, mas: "hoja", confirmarBorrado: false,
+  sesion: { estado: "desconocido", email: "", vence: 0 },   // sesión de Cloudflare Access: desconocido · activa · vencida · sin-worker
   an: { vista: "resumen", anio: String(new Date().getFullYear()), mes: 0, cat: "Comida", metrica: "Egreso" }
 };
 
@@ -77,6 +83,7 @@ function load() {
       S.movs = Array.isArray(j.movs) ? j.movs : [];
       S.cfg = { ...clone(DEFAULT_CFG), ...(j.cfg || {}), v: (j.cfg && j.cfg.v) || 1 };
       S.cfg.sync = { ...DEFAULT_CFG.sync, ...(S.cfg.sync || {}) };
+      if (S.cfg.sync.modo !== "directo") S.cfg.sync.modo = "worker";
     }
   } catch (e) { /* datos dañados: se empieza vacío */ }
   migrate();
@@ -97,7 +104,39 @@ function migrate() {
     S.movs.forEach(m => { if (m.cat === "Salud y bienestar") m.cat = "Salud"; });
     S.cfg.v = 2; changed = true;
   }
+  if ((S.cfg.v || 1) < 3) {
+    // v3: la hoja se alcanza por el Worker protegido. Quien ya tenía URL y clave sigue en modo directo
+    // hasta que cambie al Worker en Más › Google Sheet; nada se borra solo (migración reversible).
+    S.cfg.sync.modo = S.cfg.sync.url ? "directo" : "worker";
+    S.cfg.v = 3; changed = true;
+  }
+  if (ensureInversion(S.cfg, today().slice(0, 7))) changed = true;
   if (changed) persist();
+}
+/* Fase 3 (inversión). A propósito NO depende de cfg.v: otra migración (seguridad) también sube la versión y las dos
+   deben correr bien, en cualquier orden, sobre cualquier configuración guardada. Solo completa lo que falte dentro de
+   cfg.inversion y nunca toca movimientos ni otras secciones. Es idempotente: si no falta nada, no cambia nada. */
+function ensureInversion(cfg, ym) {
+  const base = DEFAULT_CFG.inversion;
+  let ch = false;
+  if (!cfg.inversion || typeof cfg.inversion !== "object" || Array.isArray(cfg.inversion)) { cfg.inversion = clone(base); ch = true; }
+  const inv = cfg.inversion;
+  if (typeof inv.pct !== "number" || !(inv.pct >= 0)) { inv.pct = base.pct; ch = true; }
+  if (!Array.isArray(inv.reparto) || !inv.reparto.length) { inv.reparto = clone(base.reparto); ch = true; }
+  if (!inv.instrumentos || typeof inv.instrumentos !== "object" || Array.isArray(inv.instrumentos)) {
+    inv.instrumentos = clone(base.instrumentos);
+    inv.reparto.forEach(([n]) => { if (!inv.instrumentos[n]) inv.instrumentos[n] = [String(n).toLowerCase()]; });
+    ch = true;
+  }
+  const metas = Array.isArray(inv.metas) ? inv.metas.filter(m => m && /^\d{4}-\d{2}$/.test(m.desde) && typeof m.pct === "number" && m.pct >= 0) : [];
+  if (!Array.isArray(inv.metas) || metas.length !== inv.metas.length) ch = true;
+  metas.sort((a, b) => a.desde.localeCompare(b.desde));
+  if (!metas.length) { metas.push({ desde: ym, pct: inv.pct }); ch = true; }
+  // El % vigente (lo usa Inicio) y la última meta registrada deben coincidir; si no, se registra desde este mes.
+  const last = metas[metas.length - 1];
+  if (Math.abs(last.pct - inv.pct) > 1e-9) { if (last.desde >= ym && metas.length > 1) last.pct = inv.pct; else metas.push({ desde: ym, pct: inv.pct }); ch = true; }
+  inv.metas = metas;
+  return ch;
 }
 function persist() {
   try { localStorage.setItem(LKEY, JSON.stringify({ movs: S.movs, cfg: S.cfg })); return true; }
@@ -169,8 +208,114 @@ function resumenMes(ym, hoy) {
   const prom = esActual ? promIngresos3m(all, ym) : null;
   const estimado = prom && ingresos < prom ? { ingresos: prom, ...margen(prom, consumo, inversion, pctMeta) } : null;
   const ultimos = all.map((r, i) => [r, i]).sort((a, b) => b[0].fecha.localeCompare(a[0].fecha) || b[1] - a[1]).slice(0, 5).map(a => a[0]);
-  return { ym, y, mo, ingresos, gastos, inversion, consumo, pctMeta, ...m, esActual, diasMes, diaHoy, diasRestantes, diario, estimado, ultimos, n: ms.length };
+  const nIng = ms.filter(r => r.tipo === "Ingreso").length;
+  // De dónde viene cada movimiento del mes: filas de la hoja o capturas del cel (y cuántas faltan por enviar).
+  const origen = { hoja: ms.filter(r => !r.local).length, local: ms.filter(r => r.local).length, pend: ms.filter(r => r.pendiente).length };
+  return { ym, y, mo, ingresos, gastos, inversion, consumo, pctMeta, ...m, esActual, diasMes, diaHoy, diasRestantes, diario, estimado, ultimos, n: ms.length, nIng, origen };
 }
+// Cuenta compacta de Inicio: cada paso con su monto (ya con signo, suman el total) y la causa del resultado en una frase.
+function explicaMargen(r) {
+  const mes = MESES[r.mo - 1], pct = Math.round(r.pctMeta * 100) + "%", sinIng = r.ingresos <= 0, antes = r.ingresos - r.consumo;
+  const apartado = r.reserva <= 0 ? "Apartado para inversión" : r.inversion >= r.meta ? "Inversión ya hecha" : `Meta de inversión (${pct})`;
+  const pasos = [
+    { k: "ingresos", label: "Ingresos recibidos", monto: r.ingresos },
+    { k: "consumo", label: r.inversion > 0 ? "Gastos sin inversión" : "Gastos", monto: -r.consumo },
+    { k: "reserva", label: apartado, monto: -r.reserva },
+    { k: "disponible", label: "Disponible", monto: r.disponible, total: true }
+  ];
+  let causa;
+  if (!r.n) causa = `Sin movimientos en ${mes}.`;
+  else if (sinIng && r.consumo > 0) causa = `Sin ingresos registrados en ${mes}: todo lo gastado queda en negativo. Si ya cobraste, captúralo con +.`;
+  else if (sinIng) causa = `Sin ingresos registrados en ${mes}; se descuenta lo que invertiste.`;
+  else if (r.disponible < 0 && antes >= 0) causa = `Ibas ${fmt.format(antes)} a favor; los ${fmt.format(r.reserva)} apartados para inversión te dejan en negativo.`;
+  else if (r.disponible < 0) causa = `Gastaste ${fmt.format(-antes)} más de lo que entró, sin contar la inversión. Es según tus registros, no tu saldo bancario.`;
+  else causa = `Margen de ${mes} según tus registros, no tu saldo bancario.`;
+  return { causa, pasos };
+}
+
+/* ---------- Inversión: meta por mes, instrumentos e historial (funciones puras, probadas en tests/run.js) ---------- */
+const SIN_CLASIF = "Sin clasificar", POR_REVISAR = "Por revisar";
+const normTxt = s => String(s || "").toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/[^a-z0-9]+/g, " ").trim();
+// Instrumentos cuyas palabras aparecen completas en la descripción, sin acentos ni mayúsculas ("nu" no es "nuevo").
+function candidatosInstrumento(desc, instrumentos) {
+  const t = " " + normTxt(desc) + " ";
+  return Object.entries(instrumentos || S.cfg.inversion.instrumentos || {})
+    .filter(([, ws]) => (ws || []).some(w => { const k = normTxt(w); return k && t.includes(" " + k + " "); })).map(([n]) => n);
+}
+// Instrumento de una inversión: sin coincidencia → Sin clasificar; dos o más → Por revisar, no se asigna a ninguno.
+function instrumento(desc, instrumentos) {
+  const cand = candidatosInstrumento(desc, instrumentos);
+  return cand.length === 1 ? cand[0] : cand.length ? POR_REVISAR : SIN_CLASIF;
+}
+// Guarda el % vigente y desde qué mes aplica. Los meses anteriores conservan su %: nunca se reescriben.
+// La primera entrada es la referencia histórica (el % con que se estrenó el historial) y tampoco se toca:
+// un cambio en ese mismo mes se agrega como entrada nueva y gana por ser la última.
+function registrarMeta(p, ym) {
+  const inv = S.cfg.inversion, metas = inv.metas, last = metas[metas.length - 1];
+  inv.pct = p;
+  if (last && Math.abs(last.pct - p) < 1e-9) return;
+  if (last && last.desde >= ym && metas.length > 1) last.pct = p; else metas.push({ desde: ym, pct: p });   // mismo mes: se corrige el registro, no se agrega otro
+}
+// % objetivo que aplica a un mes. Antes del primer registro no hay historial: se usa el primer % conocido y se marca estimado.
+function pctObjetivo(ym, inv) {
+  inv = inv || S.cfg.inversion;
+  const metas = inv.metas || [];
+  let m = null; for (const x of metas) { if (x.desde <= ym) m = x; else break; }
+  return m ? { pct: m.pct, estimado: false } : { pct: metas.length ? metas[0].pct : (inv.pct || 0), estimado: true };
+}
+// Resumen de inversión de un mes: meta = ingresos reales × % de ese mes; el cumplimiento puede pasar de 100%.
+function inversionMes(ym, all) {
+  all = all || filas();
+  const [y, mo] = ym.split("-").map(Number), ms = all.filter(r => r.y === y && r.m === mo);
+  const movs = ms.filter(r => r.tipo === "Egreso" && r.cat === "Inversion");
+  const ingresos = ing(ms), invertido = sum(movs), { pct: p, estimado } = pctObjetivo(ym), meta = ingresos * p;
+  return { ym, y, m: mo, ingresos, invertido, pct: p, estimado, meta, pendiente: Math.max(0, meta - invertido), extra: Math.max(0, invertido - meta),
+    cumplimiento: meta > 0 ? invertido / meta : null, cumplida: meta > 0 && invertido >= meta - 0.005, movs };
+}
+// Distribución por instrumento contra una meta: objetivo = meta × % del reparto; real = lo clasificado por descripción.
+// Después van los instrumentos con reglas pero sin % (p. ej. CETES histórico) y, aparte, Sin clasificar y Por revisar.
+function distribucion(movs, meta, inv) {
+  inv = inv || S.cfg.inversion;
+  const real = {}, descs = {};
+  movs.forEach(r => { const k = instrumento(r.desc, inv.instrumentos); real[k] = (real[k] || 0) + r.monto; (descs[k] ||= new Set()).add((r.desc || "—").toUpperCase()); });
+  const filas = inv.reparto.map(([n, p]) => { const o = meta * p, v = real[n] || 0; return { nombre: n, pct: p, objetivo: o, real: v, diferencia: v - o, falta: Math.max(0, o - v) }; });
+  Object.keys(real).filter(k => k !== SIN_CLASIF && k !== POR_REVISAR && !filas.some(f => f.nombre === k)).sort((a, b) => real[b] - real[a])
+    .forEach(k => filas.push({ nombre: k, pct: 0, objetivo: 0, real: real[k], diferencia: real[k], falta: 0, fuera: true }));
+  return { filas, sinClasificar: real[SIN_CLASIF] || 0, porRevisar: real[POR_REVISAR] || 0, total: sum(movs),
+    descsSin: [...(descs[SIN_CLASIF] || [])], descsRev: [...(descs[POR_REVISAR] || [])] };
+}
+// Historial mes a mes desde el primer movimiento hasta hoy, con racha, acumulados, meses por debajo y ritmo de aportación.
+function historialInversion(hoyYm, all) {
+  all = all || filas(); hoyYm = hoyYm || today().slice(0, 7);
+  const g = {};
+  all.forEach(r => { const k = r.fecha.slice(0, 7); if (k > hoyYm) return; (g[k] ||= { ing: 0, inv: 0 }); if (r.tipo === "Ingreso") g[k].ing += r.monto; else if (r.cat === "Inversion") g[k].inv += r.monto; });
+  const keys = Object.keys(g).sort(), meses = [];
+  for (let ym = keys[0]; ym && ym <= hoyYm; ym = shiftMonth(ym, 1)) {
+    const d = g[ym] || { ing: 0, inv: 0 }, { pct: p, estimado } = pctObjetivo(ym), meta = d.ing * p;
+    meses.push({ ym, ingresos: d.ing, invertido: d.inv, pct: p, estimado, meta, diferencia: d.inv - meta, cumplimiento: meta > 0 ? d.inv / meta : null, cumplida: meta > 0 && d.inv >= meta - 0.005 });
+  }
+  // Racha: meses seguidos cumpliendo, de hoy hacia atrás. El mes en curso cuenta solo si ya cumplió; un mes sin meta (sin ingresos) no la rompe.
+  let racha = 0;
+  for (let i = meses.length - 1; i >= 0; i--) { const m = meses[i]; if (m.meta <= 0) continue; if (m.cumplida) racha++; else if (m.ym !== hoyYm) break; }
+  const cerrados = meses.filter(m => m.ym < hoyYm), ult = cerrados.slice(-6);
+  const ritmo = ult.length ? ult.reduce((a, m) => a + m.invertido, 0) / ult.length : 0;   // promedio de aportaciones de los últimos 6 meses cerrados
+  return { meses, racha, ritmo, proyeccion12: ritmo * 12, mesesRitmo: ult.length,
+    acumInv: meses.reduce((a, m) => a + m.invertido, 0), acumMeta: meses.reduce((a, m) => a + m.meta, 0),
+    porDebajo: meses.filter(m => m.meta > 0 && !m.cumplida && m.ym !== hoyYm).reverse() };
+}
+// Texto editable de instrumentos: una línea por instrumento, "Nombre: palabra, palabra". null si alguna línea está mal.
+function parseInstrumentos(txt) {
+  const out = {};
+  for (const ln of String(txt || "").split(/\r?\n/)) {
+    const s = ln.trim(); if (!s) continue;
+    const m = s.match(/^([^:]+):(.+)$/); if (!m) return null;
+    const n = m[1].trim(), ws = m[2].split(",").map(w => w.trim()).filter(Boolean);
+    if (!n || !ws.length) return null;
+    out[n] = ws;
+  }
+  return Object.keys(out).length ? out : null;
+}
+const textoInstrumentos = inst => Object.entries(inst || {}).map(([n, ws]) => n + ": " + ws.join(", ")).join("\n");
 
 /* ---------- Captura rápida estilo WhatsApp ---------- */
 function guessCat(text) {
@@ -331,10 +476,11 @@ function viewInicio() {
   if (!filas().length) return emptyState(ym) + syncHint();
   const r = resumenMes(ym), mes = MESES[r.mo - 1], neg = r.disponible < 0, pctTxt = Math.round(r.pctMeta * 100) + "%";
   const dinero = v => (v < 0 ? "−" : "") + fmt.format(Math.abs(v));
+  const ex = explicaMargen(r);
   let hint;
   if (!r.n) hint = `Sin movimientos en ${mes}. Toca <b>+</b> para registrar el primero.`;
-  else if (neg) hint = `Gastaste ${fmt.format(-r.disponible)} más que tu margen de ${mes}. Es según tus registros, no tu saldo bancario.`;
-  else hint = `Margen de ${mes} según tus registros, no tu saldo bancario.` + (r.esActual && r.disponible > 0 ? ` ${r.diasRestantes === 1 ? "Último día" : `Quedan ${r.diasRestantes} días`}: <b class="num">${fmt.format(r.diario)}</b> al día.` : "");
+  else if (neg) hint = ex.causa;
+  else hint = ex.causa + (r.esActual && r.disponible > 0 ? ` ${r.diasRestantes === 1 ? "Último día" : `Quedan ${r.diasRestantes} días`}: <b class="num">${fmt.format(r.diario)}</b> al día.` : "");
   const est = r.estimado ? `<p class="est"><span class="tag-est">Estimado</span><span>Con tu ingreso habitual de ${fmt.format(r.estimado.ingresos)}, el margen sería <b class="num">${dinero(r.estimado.disponible)}</b>. Arriba solo cuenta lo ya cobrado.</span></p>` : "";
   const avance = r.meta > 0 ? Math.min(1, r.inversion / r.meta) : r.inversion > 0 ? 1 : 0;
   const metaTxt = r.meta <= 0 && r.inversion <= 0 ? `Meta: ${pctTxt} de tus ingresos. Se calcula al registrar ingresos.`
@@ -342,19 +488,20 @@ function viewInicio() {
     : r.metaCumplida ? `Meta del ${pctTxt} cumplida${r.inversion > r.meta ? `, con ${fmt.format(r.inversion - r.meta)} extra` : ""}.`
     : `Meta del ${pctTxt}: faltan ${fmt.format(r.faltaMeta)}.`;
   const pend = S.movs.filter(m => !m.exportado).length, conectado = !!(S.cfg.sync.url && S.cfg.sync.clave);
+  // Cuenta compacta bajo el número y, en una línea, de dónde salen los datos (hoja o cel).
+  const o = r.origen, fila = p => `<div class="paso${p.total ? " total" : ""}"><span>${p.label}</span><span class="num${p.total ? (neg ? " neg" : "") : p.monto > 0 ? " in" : ""}">${p.monto < 0 ? "−" : ""}${fmt.format(Math.abs(p.monto))}</span></div>`;
+  const fuente = !r.n ? "" : `${r.n} movimiento${r.n === 1 ? "" : "s"}: ` + [S.datos ? `${o.hoja} de la hoja` : "", o.local ? `${o.local} de este cel${o.pend ? ` (${o.pend} sin enviar)` : ""}` : ""].filter(Boolean).join(" · ")
+    + (!S.datos ? " · hoja sin leer" : datosViejos() ? " · hoja de hace más de 3 h" : "");
   return `<section class="hero">
     <div class="label">Disponible para gastar</div>
     <div class="big${neg ? " neg" : ""}">${dinero(r.disponible)}</div>
     <p class="hint">${hint}</p>${est}
-    <div class="split">
-      <div class="pill in"><span class="label">Ingresos recibidos</span><span class="v num">${fmt.format(r.ingresos)}</span></div>
-      <div class="pill out"><span class="label">Gastos</span><span class="v num">${fmt.format(r.gastos)}</span>${r.inversion > 0 ? `<small class="sub">${fmt.format(r.inversion)} son inversión</small>` : ""}</div>
-    </div>
+    ${r.n ? `<div class="cuenta">${ex.pasos.map(fila).join("")}</div><p class="fuente">${fuente}</p>` : ""}
   </section>
   <section class="card goal">
     <div class="rowhead"><h3>Inversión</h3><span class="num">${fmt.format(r.inversion)}${r.meta > 0 ? ` <span class="muted">de ${fmt.format(r.meta)}</span>` : ""}</span></div>
     <span class="track"><span class="fill${r.metaCumplida ? " top" : ""}" style="width:${Math.round(avance * 100)}%"></span></span>
-    <p class="note">${metaTxt}</p>
+    <div class="foot"><p class="note">${metaTxt}</p><button type="button" class="link" data-go="analisis" data-vista="inversion">Ver detalle</button></div>
   </section>
   ${pend ? `<section class="card strip"><span><b>${pend}</b> movimiento${pend > 1 ? "s" : ""} sin pasar a la hoja</span>
     ${conectado ? `<button class="btn small acc" id="sendBtn" ${S.sending ? "disabled" : ""}>${S.sending ? "Enviando…" : "Enviar"}</button>` : `<button class="btn small ghost" data-go="mas">Ver</button>`}</section>` : ""}
@@ -375,7 +522,7 @@ function viewAnalisis() {
   const ys = years();
   if (S.an.anio !== "Todos" && !ys.includes(+S.an.anio)) S.an.anio = String(ys[ys.length - 1]);
   const head = `<div class="filters seg-tabs" role="tablist" aria-label="Página">${VISTAS.map(([k, n]) => `<button class="chip" data-vista="${k}" aria-pressed="${S.an.vista === k}">${n}</button>`).join("")}</div>`;
-  const filtro = S.an.vista === "anios" ? "" : `<div class="slicers">
+  const filtro = S.an.vista === "anios" || S.an.vista === "inversion" ? "" : `<div class="slicers">
       <label class="field"><span class="label">Año</span><select id="fAnio">${["Todos", ...ys.map(String)].map(a => `<option ${a === S.an.anio ? "selected" : ""}>${a}</option>`).join("")}</select></label>
       ${S.an.vista === "resumen" || S.an.vista === "habitos" ? `<label class="field"><span class="label">Mes</span><select id="fMes"><option value="0">Todos</option>${MESES.map((m, i) => `<option value="${i + 1}" ${S.an.mes === i + 1 ? "selected" : ""}>${m}</option>`).join("")}</select></label>` : ""}
     </div>`;
@@ -483,26 +630,95 @@ function anAnios() {
     <tbody>${tabla.map((t, k) => `<tr><td>${t.y}${t.n < 12 ? `<small class="muted"> ${t.n}m</small>` : ""}</td><td>${short(t.i)}</td><td>${short(t.e)} ${k ? delta(t.e / t.n, tabla[k - 1].e / tabla[k - 1].n, true) : ""}</td><td class="${t.i - t.e < 0 ? "neg" : "pos"}">${short(t.i - t.e)}</td><td>${pct(t.e, t.i)}</td><td>${short(t.n ? t.e / t.n : 0)}</td></tr>`).join("")}</tbody></table></div>
     <p class="note">La flecha compara el gasto promedio por mes contra el año anterior.</p></section>`;
 }
+/* Inversión: arriba el mes en curso (meta, invertido, pendiente, sugerencias) y la distribución por instrumento;
+   abajo el historial con su propio filtro de año. Las metas de meses sin registro de % se marcan como estimadas. */
 function anInversion() {
-  const all = filas(), rs = all.filter(r => r.tipo === "Egreso" && r.cat === "Inversion");
-  const ys = years(), maxY = Math.max(...ys);
-  const anual = ys.map(y => ({ y, inv: sum(rs.filter(r => r.y === y)), ing: ing(all.filter(r => r.y === y)) }));
-  const enSel = rs.filter(r => S.an.anio === "Todos" || r.y === +S.an.anio);
-  const ingSel = ing(all.filter(r => S.an.anio === "Todos" || r.y === +S.an.anio));
-  const meta = S.cfg.inversion.pct, metaSel = ingSel * meta;
-  const porDesc = {}; enSel.forEach(r => { const k = (r.desc || "—").toUpperCase(); porDesc[k] = (porDesc[k] || 0) + r.monto; });
-  return `<div class="kpis">
-    <div class="pill"><span class="label">Invertido</span><span class="v num">${fmt.format(sum(enSel))}</span></div>
-    <div class="pill"><span class="label">% del ingreso</span><span class="v num">${pct(sum(enSel), ingSel)}</span><small class="sub">meta ${Math.round(meta * 100)}%</small></div>
+  const all = filas(), ym = today().slice(0, 7), inv = S.cfg.inversion;
+  const r = inversionMes(ym, all), d = distribucion(r.movs, r.meta, inv), h = historialInversion(ym, all);
+  const mes = MESES[r.m - 1], pctTxt = Math.round(r.pct * 100) + "%";
+  const avance = r.meta > 0 ? Math.min(1, r.invertido / r.meta) : r.invertido > 0 ? 1 : 0;
+  const signo = v => (v < 0 ? "−" : "+") + fmt.format(Math.abs(v));
+  const lista = arr => arr.length > 1 ? arr.slice(0, -1).join(", ") + " y " + arr[arr.length - 1] : arr.join("");
+  // Sugerencias: aritmética sobre tus propias reglas (meta, reparto, ingresos), nunca sobre qué producto comprar.
+  const sug = [];
+  if (r.meta <= 0) sug.push(r.invertido > 0 ? `Invertiste ${fmt.format(r.invertido)} sin ingresos registrados en ${mes}; la meta se calcula al registrar ingresos.` : `Sin ingresos registrados en ${mes}: la meta (${pctTxt}) se calcula al registrar el primero.`);
+  else {
+    sug.push(r.pendiente > 0 ? `Te faltan <b class="num">${fmt.format(r.pendiente)}</b> para cumplir la meta de ${mes}.` : `Meta de ${mes} cumplida${r.extra > 0 ? ` con <b class="num">${fmt.format(r.extra)}</b> extra` : ""}.`);
+    const falta = d.filas.filter(f => f.pct > 0 && f.falta >= 1), arriba = d.filas.filter(f => f.pct > 0 && f.diferencia >= 1);
+    if (falta.length) sug.push(`Según tu distribución, podrías asignar ${lista(falta.map(f => `<b class="num">${fmt.format(f.falta)}</b> a ${esc(f.nombre)}`))}${arriba.length ? `; ${lista(arriba.map(f => esc(f.nombre)))} ya ${arriba.length > 1 ? "van" : "va"} por encima` : ""}.`);
+    else if (arriba.length) sug.push(`Tu distribución va por encima del objetivo en ${lista(arriba.map(f => `${esc(f.nombre)} (${signo(f.diferencia)})`))}.`);
+    const fuera = d.sinClasificar + d.porRevisar;
+    if (fuera >= 1 && (falta.length || arriba.length)) sug.push(`Los <b class="num">${fmt.format(fuera)}</b> sin clasificar o por revisar no entran en el reparto.`);
+    const prom = promIngresos3m(all, ym);   // ingresos extra: más de 5% arriba del promedio de los 3 meses anteriores con ingresos
+    if (prom && r.ingresos > prom * 1.05) sug.push(`Este mes recibiste <b class="num">${fmt.format(r.ingresos - prom)}</b> más que tu ingreso habitual; tu meta subió <b class="num">${fmt.format((r.ingresos - prom) * r.pct)}</b>.`);
+  }
+  // Historial según el filtro de año: 12 meses del año elegido o un punto por año con "Todos". Un periodo es "estimado"
+  // si alguna de sus metas lo es; un año que mezcla meses estimados y registrados va como estimado y la nota lo dice.
+  const ys = years(), anio = S.an.anio;
+  const slicer = `<div class="slicers"><label class="field"><span class="label">Año</span><select id="fAnio">${["Todos", ...ys.map(String)].map(a => `<option ${a === anio ? "selected" : ""}>${a}</option>`).join("")}</select></label></div>`;
+  let labels, names, periodos, enPeriodo;
+  if (anio === "Todos") {
+    const porY = {}; h.meses.forEach(m => { const y = m.ym.slice(0, 4); (porY[y] ||= { meta: 0, inv: 0, n: 0, est: 0 }); porY[y].meta += m.meta; porY[y].inv += m.invertido; porY[y].n++; if (m.estimado) porY[y].est++; });
+    labels = Object.keys(porY).sort(); names = labels;
+    periodos = labels.map(y => ({ meta: porY[y].meta, inv: porY[y].inv, estimado: porY[y].est > 0, mixto: porY[y].est > 0 && porY[y].est < porY[y].n }));
+    enPeriodo = h.meses;
+  } else {
+    const y = +anio;
+    labels = MES3; names = MESES.map(m => m + " " + y);
+    periodos = MES3.map((_, i) => { const m = h.meses.find(x => x.ym === y + "-" + pad(i + 1)); return m ? { meta: m.meta, inv: m.invertido, estimado: m.estimado } : null; });
+    enPeriodo = h.meses.filter(m => m.ym.slice(0, 4) === anio);
+  }
+  const metaS = periodos.map(p => p ? p.meta : null), invS = periodos.map(p => p ? p.inv : null);
+  // Dos series de meta para que leyenda, tooltip y "Ver datos" distingan la estimada de la registrada.
+  const metaEst = periodos.map(p => p && p.estimado ? p.meta : null), metaReg = periodos.map(p => p && !p.estimado ? p.meta : null);
+  const series = [];
+  if (metaEst.some(v => v != null)) series.push({ name: "Meta estimada", values: metaEst, color: "var(--muted)" });
+  if (metaReg.some(v => v != null)) series.push({ name: "Meta registrada", values: metaReg, color: "var(--ink)" });
+  series.push({ name: "Invertido", values: invS, color: "var(--accent)", bold: true });
+  const nombres = names.map((n, i) => periodos[i] && periodos[i].estimado ? n + " · meta estimada" : n);   // tooltip y Ver datos de la gráfica de diferencia
+  const perInv = enPeriodo.reduce((a, m) => a + m.invertido, 0), perMeta = enPeriodo.reduce((a, m) => a + m.meta, 0);
+  const cerradosConMeta = enPeriodo.filter(m => m.meta > 0 && m.ym !== ym).length;
+  const debajo = h.porDebajo.filter(m => anio === "Todos" || m.ym.slice(0, 4) === anio);
+  const estim = enPeriodo.filter(m => m.estimado), todoEst = estim.length > 0 && estim.length === enPeriodo.length, desde = inv.metas[0].desde;
+  const mixtos = anio === "Todos" ? labels.filter((_, i) => periodos[i].mixto) : [];
+  const notaEst = estim.length ? `<p class="note">Meta estimada hasta ${monthLabel(shiftMonth(desde, -1))}, con el ${Math.round(estim[0].pct * 100)}% que tenías al estrenar este historial: no hay registro de tu porcentaje en esos meses. Desde ${monthLabel(desde)} la meta es la registrada.${mixtos.length ? ` ${mixtos.join(" y ")} mezcla meses estimados y registrados.` : ""}</p>` : "";
+  const movsPer = all.filter(x => x.tipo === "Egreso" && x.cat === "Inversion" && x.fecha.slice(0, 7) <= ym && (anio === "Todos" || x.y === +anio));
+  const dPer = distribucion(movsPer, perMeta, inv);
+  const barras = dPer.filas.filter(f => f.real > 0).map(f => [f.pct > 0 ? `${f.nombre} · meta ${Math.round(f.pct * 100)}%` : f.nombre, f.real]);
+  if (dPer.sinClasificar) barras.push([SIN_CLASIF, dPer.sinClasificar]);
+  if (dPer.porRevisar) barras.push([POR_REVISAR, dPer.porRevisar]);
+  const filaD = f => `<div class="drow${f.fuera ? " fuera" : ""}"><span class="n">${esc(f.nombre)}<small>${f.pct > 0 ? `${Math.round(f.pct * 100)}% · objetivo ${fmt.format(f.objetivo)}` : "sin % en tu reparto"}</small></span><span class="num v">${fmt.format(f.real)}</span><span class="num d ${f.pct > 0 ? (f.diferencia < -0.5 ? "neg" : "pos") : ""}">${f.pct > 0 ? signo(f.diferencia) : ""}</span></div>`;
+  const filaX = (nombre, monto, descs, nota, cls) => `<div class="drow ${cls}"><span class="n">${nombre}<small>${esc(descs.slice(0, 3).join(", "))}${descs.length > 3 ? ` y ${descs.length - 3} más` : ""} · ${nota}</small></span><span class="num v">${fmt.format(monto)}</span><span class="d"></span></div>`;
+  return `<section class="card goal">
+    <div class="rowhead"><h3>${mes[0].toUpperCase() + mes.slice(1)} ${r.y}</h3><span class="kpi num inl${r.cumplida ? " pos" : ""}">${r.cumplimiento == null ? "—" : Math.round(r.cumplimiento * 100) + "%"}</span></div>
+    <span class="track"><span class="fill${r.cumplida ? " top" : ""}" style="width:${Math.round(avance * 100)}%"></span></span>
+    <div class="invest">
+      <div><b>Meta</b><span class="num">${fmt.format(r.meta)}</span><small>${pctTxt} de ${fmt.format(r.ingresos)}</small></div>
+      <div><b>Invertido</b><span class="num">${fmt.format(r.invertido)}</span><small>${r.movs.length} movimiento${r.movs.length === 1 ? "" : "s"}</small></div>
+      <div><b>${r.extra > 0 ? "Extra" : "Pendiente"}</b><span class="num">${fmt.format(r.extra > 0 ? r.extra : r.pendiente)}</span><small>${r.extra > 0 ? "sobre la meta" : "para la meta"}</small></div>
+    </div>
+    ${sug.map(s => `<p class="note">${s}</p>`).join("")}
+  </section>
+  <section class="card">
+    <div class="rowhead"><h3>Distribución de ${mes}</h3><button type="button" class="link" data-go="mas" data-mas="ajustes">Editar</button></div>
+    <div class="dist">${d.filas.map(filaD).join("")}
+      ${d.sinClasificar ? filaX(SIN_CLASIF, d.sinClasificar, d.descsSin, "agrega la palabra a un instrumento", "fuera") : ""}
+      ${d.porRevisar ? filaX(POR_REVISAR, d.porRevisar, d.descsRev, "coincide con más de un instrumento", "alerta") : ""}
+    </div>
+    ${r.movs.length ? `<details class="verdatos"><summary>Ver movimientos</summary><div class="mini">${r.movs.slice().sort((a, b) => b.fecha.localeCompare(a.fecha)).map(m => `<div class="mrow"><span class="d"><strong>${esc(m.desc || "—")}</strong><small>${esc(instrumento(m.desc, inv.instrumentos))} · ${esc(ddmmaa(m.fecha))}</small></span><span class="num">${fmt.format(m.monto)}</span></div>`).join("")}</div></details>` : ""}
+  </section>
+  ${slicer}
+  <div class="kpis">
+    <div class="pill"><span class="label">Racha</span><span class="v num">${h.racha} mes${h.racha === 1 ? "" : "es"}</span><small class="sub">cumpliendo la meta, contando solo meses con ingresos</small></div>
+    <div class="pill"><span class="label">Proyección 12 meses</span><span class="v num">${fmt.format(h.proyeccion12)}</span><small class="sub">${h.mesesRitmo ? `aportando ${fmt.format(h.ritmo)}/mes, sin rendimientos` : "aún sin meses cerrados"}</small></div>
+    <div class="pill"><span class="label">Invertido ${anio === "Todos" ? "en total" : "en " + anio}</span><span class="v num">${fmt.format(perInv)}</span><small class="sub">${pct(perInv, perMeta)} de ${fmt.format(perMeta)} de meta${estim.length ? (todoEst ? " estimada" : ", parte estimada") : ""}</small></div>
+    <div class="pill"><span class="label">Meses por debajo</span><span class="v num${debajo.length ? " neg" : ""}">${debajo.length}</span><small class="sub">de ${cerradosConMeta} cerrados con meta</small></div>
   </div>
-  ${metaSel > 0 ? `<section class="card"><h3>Reparto de la meta</h3><p class="note">${Math.round(meta * 100)}% del ingreso del periodo: <b class="num" style="color:var(--ink)">${fmt.format(metaSel)}</b></p>
-    <div class="invest">${S.cfg.inversion.reparto.map(([n, p]) => `<div><b>${esc(n)}</b><span class="num">${fmt.format(metaSel * p)}</span></div>`).join("")}</div></section>` : ""}
-  <section class="card"><h3>Inversión por año</h3>${colChart(anual.map(a => a.inv), anual.map(a => String(a.y)), { colors: anual.map(a => YCOL(a.y)), label: "Inversión por año", col: "Año", serie: "Invertido" })}
-    <div class="tbl"><table><thead><tr><th>Año</th><th>Invertido</th><th>% ingreso</th><th>vs meta</th></tr></thead><tbody>
-    ${anual.map(a => { const p = a.ing ? a.inv / a.ing : 0; return `<tr><td>${a.y}</td><td>${short(a.inv)}</td><td>${pct(a.inv, a.ing)}</td><td class="${p >= meta ? "pos" : "neg"}">${p >= meta ? "Cumplida" : short(a.ing * meta - a.inv) + " abajo"}</td></tr>`; }).join("")}</tbody></table></div></section>
-  <section class="card"><h3>Por mes, cada año</h3>${lineChart(porAnioMes(rs, () => true).map(s => ({ name: String(s.y), values: s.values, color: YCOL(s.y), bold: s.y === maxY })), MES3, { label: "Inversión por mes", names: MESES })}</section>
-  ${Object.keys(porDesc).length ? `<section class="card"><h3>A dónde fue</h3>${barsH(Object.entries(porDesc).sort((a, b) => b[1] - a[1]).slice(0, 8), sum(enSel))}</section>` : ""}
-  ${enSel.length ? `<section class="card"><h3>Movimientos de inversión</h3>${listaSimple(enSel.slice().sort((a, b) => b.fecha.localeCompare(a.fecha)).slice(0, 15))}</section>` : ""}`;
+  ${notaEst}
+  <section class="card"><h3>Meta vs invertido</h3>${lineChart(series, labels, { label: "Meta e inversión por periodo", names })}</section>
+  <section class="card"><h3>Diferencia contra la meta</h3><p class="note">Lo que invertiste de más (verde) o de menos (rojo) en cada ${anio === "Todos" ? "año" : "mes"}.</p>${colChart(invS.map((v, i) => v == null ? 0 : v - (metaS[i] || 0)), labels, { posneg: true, label: "Diferencia contra la meta", names: nombres, serie: "Diferencia" })}</section>
+  ${debajo.length ? `<section class="card"><h3>Meses por debajo de la meta</h3><div class="mini">${debajo.slice(0, 8).map(m => `<div class="mrow"><span class="d"><strong>${esc(monthLabel(m.ym))}</strong><small>${fmt.format(m.invertido)} de ${fmt.format(m.meta)}${m.estimado ? " · meta estimada" : ""}</small></span><span class="num neg">${signo(m.diferencia)}</span></div>`).join("")}</div>${debajo.length > 8 ? `<p class="note">y ${debajo.length - 8} más.</p>` : ""}</section>` : ""}
+  ${barras.length ? `<section class="card"><h3>Por instrumento ${anio === "Todos" ? "en total" : "en " + anio}</h3>${barsH(barras, dPer.total)}<p class="note" style="margin-top:10px">El porcentaje es de lo invertido en el periodo; compáralo con la meta de cada instrumento.</p></section>` : ""}`;
 }
 function anHabitos() {
   const rs = sel(), all = filas();
@@ -566,16 +782,19 @@ function exportRows() {
   return base.slice().sort((a, b) => (a.fecha + (a.creado || "")).localeCompare(b.fecha + (b.creado || "")));
 }
 const MAS = [["hoja", "Google Sheet"], ["conciliar", "Conciliar"], ["ajustes", "Ajustes"], ["respaldo", "Respaldo"]];
-const conectada = () => !!(S.cfg.sync.url && S.cfg.sync.clave);
+const modoWorker = () => S.cfg.sync.modo !== "directo";
+/* "Conectada" = hay forma de llegar a la hoja: por el Worker (mientras no sepamos que falta configurarlo) o con URL y clave. */
+const conectada = () => modoWorker() ? S.sesion.estado !== "sin-worker" : !!(S.cfg.sync.url && S.cfg.sync.clave);
 const fechaHora = iso => new Date(iso).toLocaleString("es-MX", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
 /* Estado de la sincronización: siempre visible arriba de Más */
 function estadoSync() {
   const pend = S.movs.filter(m => !m.exportado).length;
-  const estado = !conectada() ? "Sin conexión con tu Google Sheet: puedes copiar y pegar las filas."
-    : !S.datos ? '<span class="ok">Conectada.</span> Aún no se ha traído tu historial.'
-    : `<span class="ok">Conectada.</span> ${S.datos.filas.length.toLocaleString("es-MX")} movimientos de tu hoja, al ${fechaHora(S.datos.leido)}.${S.datos.malas ? ` ${S.datos.malas} filas sin fecha o cantidad válida se omitieron.` : ""}`;
+  const via = !modoWorker() ? '<span class="ok">Conectada.</span>' : S.sesion.estado === "activa" ? '<span class="ok">Conectada por el Worker protegido.</span>' : "Por el Worker protegido.";
+  const estado = !conectada() ? (modoWorker() ? "El Worker protegido aún no está configurado: puedes copiar y pegar las filas." : "Sin conexión con tu Google Sheet: puedes copiar y pegar las filas.")
+    : !S.datos ? `${via} Aún no se ha traído tu historial.`
+    : `${via} ${S.datos.filas.length.toLocaleString("es-MX")} movimientos de tu hoja, al ${fechaHora(S.datos.leido)}.${S.datos.malas ? ` ${S.datos.malas} filas sin fecha o cantidad válida se omitieron.` : ""}`;
   return `<section class="card sync">
-    <p class="note">${estado}</p>
+    <p class="note">${estado}</p>${sesionTxt()}
     <p class="note">${pend ? `<span class="warn">${pend} movimiento${pend > 1 ? "s" : ""} sin pasar a la hoja.</span>` : "Todo lo capturado ya está en la hoja."}</p>
     ${conectada() ? `<button class="btn ghost small" id="readBtn" style="margin-top:10px" ${S.leyendo ? "disabled" : ""}>${S.leyendo ? "Actualizando…" : "Actualizar desde la hoja"}</button>` : ""}
   </section>`;
@@ -604,21 +823,50 @@ function masHoja() {
       </div>` :
       `<p class="note" style="padding:14px 0">${S.expScope === "pend" ? "Todo está pasado a tu hoja." : "No capturaste nada desde el cel este mes."}</p>`}
   </section>
-  <section class="card"><h3>Conexión con Google Sheet</h3>
+  ${cardConexion()}`;
+}
+/* Estado de la sesión de Cloudflare Access (solo en modo Worker). */
+function sesionTxt() {
+  if (!modoWorker()) return "";
+  const s = S.sesion;
+  if (s.estado === "vencida") return `<p class="note"><span class="warn">Tu sesión de Cloudflare venció.</span> <button class="btn small" type="button" id="loginBtn">Entrar</button></p>`;
+  if (s.estado === "activa" && s.email) return `<p class="note">Sesión de ${esc(s.email)}${s.vence ? ", vence el " + fechaHora(s.vence * 1000) : ""}.</p>`;
+  return "";
+}
+/* Conexión con la hoja. Modo Worker: nada que capturar, solo probar y entrar de nuevo a Cloudflare.
+   Modo directo (transición): el formulario de siempre más el paso al Worker; las credenciales no se borran solas. */
+function cardConexion() {
+  const s = S.cfg.sync, conCred = !!(s.url && s.clave);
+  const entrar = S.sesion.estado === "vencida" ? "" : `<button class="btn ghost small" type="button" id="loginBtn">Entrar a Cloudflare</button>`;
+  if (modoWorker()) {
+    return `<section class="card"><h3>Conexión con Google Sheet</h3>
+    <p class="note">Los envíos pasan por el Worker protegido de Cloudflare. La URL y la clave de tu Apps Script viven como secretos del servidor, no en este iPhone.</p>
+    <div class="btns"><button class="btn ghost small" type="button" id="testBtn">Probar conexión</button>${entrar}</div>
+    ${conCred ? `<p class="note" style="margin-top:14px">Este iPhone todavía guarda la URL y la clave del modo directo. Cuando confirmes que el Worker funciona, bórralas; mientras, puedes volver al modo directo.</p>
+    <div class="btns"><button class="btn ghost small" type="button" id="directoBtn">Volver al modo directo</button><button class="btn ghost small" type="button" id="borrarCredBtn">${S.confirmarBorrado ? "¿Seguro? Toca otra vez" : "Borrar credenciales del teléfono"}</button></div>` : ""}
+  </section>`;
+  }
+  return `<section class="card"><h3>Conexión con Google Sheet</h3>
     <form class="stack" id="syncForm">
-      <p class="note">${conectado ? "“Enviar” agrega las filas directo a Finanzas 2026. Cambia la URL o la clave solo si vuelves a publicar el Apps Script." : "Pega aquí la URL y la clave de tu Apps Script (las instrucciones están en el README del repo). Sin conexión puedes seguir copiando y pegando."}</p>
-      <div class="field"><span class="label">URL del Apps Script</span><input id="syncUrl" type="url" inputmode="url" autocomplete="off" placeholder="https://script.google.com/macros/s/…/exec" value="${esc(S.cfg.sync.url)}"></div>
-      <div class="field"><span class="label">Clave</span><input id="syncClave" type="password" autocomplete="off" autocapitalize="off" value="${esc(S.cfg.sync.clave)}"></div>
+      <p class="note">${conCred ? "“Enviar” agrega las filas directo a Finanzas 2026. Cambia la URL o la clave solo si vuelves a publicar el Apps Script." : "Pega aquí la URL y la clave de tu Apps Script (las instrucciones están en el README del repo). Sin conexión puedes seguir copiando y pegando."}</p>
+      <div class="field"><span class="label">URL del Apps Script</span><input id="syncUrl" type="url" inputmode="url" autocomplete="off" placeholder="https://script.google.com/macros/s/…/exec" value="${esc(s.url)}"></div>
+      <div class="field"><span class="label">Clave</span><input id="syncClave" type="password" autocomplete="off" autocapitalize="off" value="${esc(s.clave)}"></div>
       <div class="btns"><button class="btn ghost small" type="button" id="testBtn">Probar conexión</button><button class="btn small" type="submit">Guardar</button></div>
     </form>
+    <p class="note" style="margin-top:14px"><b>Modo protegido (nuevo).</b> Cuando el Worker y Cloudflare Access estén listos, pruébalo y cámbiate aquí. Tus credenciales se quedan en el cel hasta que tú las borres.</p>
+    <div class="btns"><button class="btn ghost small" type="button" id="probarWorkerBtn">Probar el Worker</button><button class="btn small" type="button" id="usarWorkerBtn">Usar el Worker protegido</button>${entrar}</div>
   </section>`;
 }
 function masAjustes() {
+  const inv = S.cfg.inversion, vigente = inv.metas[inv.metas.length - 1];
   return `<section class="card"><h3>Meta de inversión</h3>
     <form class="stack" id="invForm">
-      <div class="two"><div class="field"><span class="label">% del ingreso</span><input id="invPct" inputmode="decimal" value="${Math.round(S.cfg.inversion.pct * 100)}"></div>
-      <div class="field"><span class="label">Reparto</span><input id="invRep" autocomplete="off" value="${esc(S.cfg.inversion.reparto.map(([n, p]) => n + " " + Math.round(p * 100)).join(", "))}"></div></div>
+      <div class="two"><div class="field"><span class="label">% del ingreso</span><input id="invPct" inputmode="decimal" value="${Math.round(inv.pct * 100)}"></div>
+      <div class="field"><span class="label">Reparto</span><input id="invRep" autocomplete="off" value="${esc(inv.reparto.map(([n, p]) => n + " " + Math.round(p * 100)).join(", "))}"></div></div>
       <p class="note">Inicio aparta este porcentaje de tus ingresos al calcular el disponible. Ejemplo de reparto: <code>NU 60, GBM 20, Bitcoin 20</code></p>
+      <p class="note">${vigente ? `Vigente desde ${monthLabel(vigente.desde)}. ` : ""}Si cambias el %, aplica desde este mes; los meses anteriores conservan el suyo.</p>
+      <div class="field"><span class="label">Instrumentos</span><textarea id="invInst" rows="${Math.max(3, Object.keys(inv.instrumentos).length)}" autocomplete="off" autocapitalize="off" spellcheck="false">${esc(textoInstrumentos(inv.instrumentos))}</textarea>
+        <small>Una línea por instrumento: nombre, dos puntos y las palabras que lo identifican en la descripción (palabra completa). Si una descripción coincide con dos, queda “Por revisar”.</small></div>
       <button class="btn small" type="submit">Guardar meta</button>
     </form>
   </section>
@@ -749,12 +997,47 @@ let tT;
 function toast(t) { const el = $("#toast"); el.textContent = t; el.hidden = false; clearTimeout(tT); tT = setTimeout(() => el.hidden = true, 2800); }
 
 /* ---------- Google Sheet ---------- */
+const API = "api/hoja";                                              // ruta del Worker protegido (misma página)
+const XHR = { "X-Requested-With": "XMLHttpRequest" };                // con esto Access contesta 401 y no una redirección
+const sinSesion = estado => { S.sesion = { estado, email: "", vence: 0 }; };
 async function callScript(payload) {
-  // text/plain evita la verificación CORS previa que Apps Script no responde
-  const res = await fetch(S.cfg.sync.url, { method: "POST", headers: { "Content-Type": "text/plain;charset=utf-8" }, body: JSON.stringify({ clave: S.cfg.sync.clave, ...payload }) });
-  const j = await res.json();
+  let res, j;
+  if (modoWorker()) {
+    // El Worker de Cloudflare reenvía al Apps Script con la URL y la clave que viven en el servidor; aquí nunca viajan.
+    res = await fetch(API, { method: "POST", headers: { "Content-Type": "application/json", ...XHR }, body: JSON.stringify(payload) });
+    if (res.status === 401 || res.redirected) { sinSesion("vencida"); throw new Error("tu sesión de Cloudflare venció. Entra de nuevo desde Más."); }
+    if (res.status === 503 || res.status === 404 || res.status === 405) {
+      sinSesion("sin-worker"); j = await res.json().catch(() => null);
+      throw new Error((j && j.error) || "el Worker protegido aún no está configurado");
+    }
+    j = await res.json().catch(() => null);
+    if (!j) throw new Error("el Worker respondió algo inesperado (HTTP " + res.status + ")");
+  } else {
+    // Modo directo (transición): text/plain evita la verificación CORS previa que Apps Script no responde
+    res = await fetch(S.cfg.sync.url, { method: "POST", headers: { "Content-Type": "text/plain;charset=utf-8" }, body: JSON.stringify({ clave: S.cfg.sync.clave, ...payload }) });
+    j = await res.json();
+  }
   if (!j.ok) throw new Error(j.error || "La hoja rechazó la solicitud");
+  if (modoWorker() && S.sesion.estado !== "activa") S.sesion = { ...S.sesion, estado: "activa" };
   return j;
+}
+/* Modo Worker: pregunta quién está en sesión (correo y vencimiento) para mostrarlo en Más. */
+async function revisarSesion(silencioso) {
+  if (!modoWorker() || navigator.onLine === false) return;
+  try {
+    const res = await fetch("api/yo", { headers: XHR });
+    if (res.status === 401) sinSesion("vencida");
+    else if (res.status === 503 || res.status === 404 || res.status === 405) sinSesion("sin-worker");
+    else { const j = await res.json(); if (j.ok) S.sesion = { estado: "activa", email: j.email || "", vence: j.vence || 0 }; }
+    render();
+  } catch (e) { if (!silencioso) toast("No se pudo revisar la sesión"); }
+}
+async function probarHoja() {
+  try {
+    const j = await callScript({ accion: "ping" });
+    toast("Conectada a la hoja “" + (j.hoja || "") + "”" + (j.historico === false ? " (sin pestaña Historico)" : "") + (modoWorker() ? " por el Worker" : ""));
+    return true;
+  } catch (err) { toast("No conectó: " + err.message); return false; }
 }
 async function sendPending() {
   const pend = S.movs.filter(m => !m.exportado);
@@ -772,7 +1055,7 @@ async function sendPending() {
   } finally { S.sending = false; render(); }
 }
 async function readSheet(silencioso) {
-  if (!S.cfg.sync.url || !S.cfg.sync.clave || S.leyendo) return;
+  if (!conectada() || S.leyendo) return;
   S.leyendo = true; if (!silencioso) render();
   try {
     const j = await callScript({ accion: "leer" });
@@ -786,8 +1069,10 @@ async function readSheet(silencioso) {
 }
 
 /* ---------- Respaldo ---------- */
+/* El respaldo nunca lleva la URL ni la clave del Apps Script. */
+const respaldoJSON = () => ({ app: "finanzas-bolsillo", version: 2, fecha: new Date().toISOString(), movs: S.movs, cfg: { ...S.cfg, sync: { ...DEFAULT_CFG.sync, modo: S.cfg.sync.modo } } });
 function backup() {
-  const blob = new Blob([JSON.stringify({ app: "finanzas-bolsillo", version: 2, fecha: new Date().toISOString(), movs: S.movs, cfg: { ...S.cfg, sync: { url: "", clave: "" } } }, null, 1)], { type: "application/json" });
+  const blob = new Blob([JSON.stringify(respaldoJSON(), null, 1)], { type: "application/json" });
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob); a.download = "finanzas-respaldo-" + today() + ".json";
   document.body.appendChild(a); a.click(); a.remove();
@@ -819,9 +1104,11 @@ window.addEventListener("online", render); window.addEventListener("offline", re
 $("#main").addEventListener("click", async e => {
   const t = e.target.closest("button"); if (!t) return;
   if (t.dataset.cz && CZU && CZU.click(t)) return;     // Más › Conciliar
-  if (t.dataset.go) {                                  // "Ver todos" y "Ver" desde Inicio
+  if (t.dataset.go) {                                  // "Ver todos", "Ver" y "Ver detalle" desde Inicio; "Editar" desde Inversión
     S.tab = t.dataset.go;
     if (S.tab === "movs") { S.buscar = ""; S.ym = today().slice(0, 7); }
+    if (t.dataset.vista) S.an.vista = t.dataset.vista;
+    if (t.dataset.mas) S.mas = t.dataset.mas;
     render(); window.scrollTo(0, 0); return;
   }
   if (t.dataset.mas) { S.mas = t.dataset.mas; render(); }
@@ -852,15 +1139,31 @@ $("#main").addEventListener("click", async e => {
   if (t.id === "sendBtn") { await sendPending(); readSheet(true); }
   if (t.id === "readBtn") readSheet(false);
   if (t.id === "testBtn") {
-    const url = $("#syncUrl").value.trim(), clave = $("#syncClave").value;
-    if (!url) { toast("Pega primero la URL del Apps Script"); return; }
-    const prev = S.cfg.sync; S.cfg.sync = { url, clave };
     t.textContent = "Probando…";
-    try { const j = await callScript({ accion: "ping" }); toast("Conectada a la hoja “" + (j.hoja || "") + "”" + (j.historico === false ? " (sin pestaña Historico)" : "")); }
-    catch (err) { toast("No conectó: " + err.message); }
-    S.cfg.sync = prev;
+    if (modoWorker()) { if (S.sesion.estado === "sin-worker") sinSesion("desconocido"); await probarHoja(); }
+    else {
+      const url = $("#syncUrl").value.trim(), clave = $("#syncClave").value;
+      if (!url) { toast("Pega primero la URL del Apps Script"); t.textContent = "Probar conexión"; return; }
+      const prev = S.cfg.sync; S.cfg.sync = { ...prev, url, clave };
+      await probarHoja();
+      S.cfg.sync = prev;
+    }
     t.textContent = "Probar conexión";
+    render();
   }
+  if (t.id === "probarWorkerBtn" || t.id === "usarWorkerBtn") {   // desde el modo directo: prueba el Worker sin perder las credenciales
+    const prev = S.cfg.sync; S.cfg.sync = { ...prev, modo: "worker" }; sinSesion("desconocido");
+    const ok = await probarHoja();
+    if (ok && t.id === "usarWorkerBtn") { persist(); toast("Listo: los envíos pasan por el Worker protegido"); revisarSesion(true); }
+    else S.cfg.sync = prev;
+    render();
+  }
+  if (t.id === "directoBtn") { S.cfg.sync.modo = "directo"; S.confirmarBorrado = false; persist(); render(); toast("De vuelta al modo directo"); }
+  if (t.id === "borrarCredBtn") {                                   // dos toques: el borrado no tiene vuelta atrás
+    if (!S.confirmarBorrado) { S.confirmarBorrado = true; render(); return; }
+    S.confirmarBorrado = false; S.cfg.sync = { ...S.cfg.sync, url: "", clave: "" }; persist(); render(); toast("Credenciales borradas de este iPhone");
+  }
+  if (t.id === "loginBtn") location.assign("api/entrar");           // Access pide el código y regresa a la app
   if (t.id === "backupBtn") backup();
 });
 // Gráficas: tocar o arrastrar muestra el valor. Con mouse se oculta al salir; en táctil se queda hasta tocar fuera.
@@ -889,7 +1192,7 @@ $("#main").addEventListener("submit", e => {
   e.preventDefault();
   if (e.target.dataset.cz && CZU && CZU.submit(e.target)) return;
   if (e.target.id === "syncForm") {
-    S.cfg.sync = { url: $("#syncUrl").value.trim(), clave: $("#syncClave").value };
+    S.cfg.sync = { ...S.cfg.sync, url: $("#syncUrl").value.trim(), clave: $("#syncClave").value };
     persist(); render(); toast(S.cfg.sync.url ? "Conexión guardada" : "Conexión quitada");
     if (S.cfg.sync.url) readSheet(false);
     return;
@@ -899,7 +1202,12 @@ $("#main").addEventListener("submit", e => {
     const rep = $("#invRep").value.split(",").map(s => s.trim().match(/^(.+?)\s+(\d+(?:\.\d+)?)%?$/)).filter(Boolean).map(m => [m[1], parseFloat(m[2]) / 100]);
     const tot = rep.reduce((a, r) => a + r[1], 0);
     if (!(p > 0 && p <= 1) || !rep.length || Math.abs(tot - 1) > 0.01) { toast("Revisa: el reparto debe sumar 100%"); return; }
-    S.cfg.inversion = { pct: p, reparto: rep }; persist(); render(); toast("Meta guardada");
+    const inst = parseInstrumentos($("#invInst").value);
+    if (!inst) { toast("Instrumentos: una línea por instrumento, “Nombre: palabra, palabra”"); return; }
+    rep.forEach(([n]) => { if (!inst[n]) inst[n] = [n.toLowerCase()]; });   // todo instrumento del reparto tiene al menos su nombre como regla
+    registrarMeta(p, today().slice(0, 7));                                   // guarda el % y desde qué mes aplica; no reescribe meses anteriores
+    S.cfg.inversion.reparto = rep; S.cfg.inversion.instrumentos = inst;
+    persist(); render(); toast("Meta guardada");
     return;
   }
   const f = e.target.closest("[data-add]"); if (!f) return;
@@ -917,7 +1225,11 @@ load();
 render();
 if (new URLSearchParams(location.search).has("nuevo")) openSheet(null);
 if (datosViejos()) readSheet(true);
+revisarSesion(true);
+// El service worker se registra aquí y no en index.html: la CSP de _headers no permite scripts en línea.
+if ("serviceWorker" in navigator) window.addEventListener("load", () => navigator.serviceWorker.register("sw.js").catch(() => {}));
 
 // Funciones puras para pruebas en Node
-if (typeof module !== "undefined") module.exports = { parseQuick, toRow, toTSV, normTipo, normCat, S, filas, migrate, margen, promIngresos3m, resumenMes, lineChart, colChart, barsH, sendPending, render, addMov };
+if (typeof module !== "undefined") module.exports = { parseQuick, toRow, toTSV, normTipo, normCat, S, filas, migrate, margen, promIngresos3m, resumenMes, explicaMargen, viewInicio, lineChart, colChart, barsH, sendPending, render, callScript, respaldoJSON, revisarSesion, conectada, modoWorker,
+  ensureInversion, candidatosInstrumento, instrumento, registrarMeta, pctObjetivo, inversionMes, distribucion, historialInversion, parseInstrumentos, anInversion, addMov };
 })();

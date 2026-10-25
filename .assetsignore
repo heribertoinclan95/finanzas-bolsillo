@@ -4,6 +4,7 @@
 wrangler.jsonc
 tests
 apps-script
+worker
+docs
 CLAUDE.md
 README.md
-docs
