@@ -31,6 +31,54 @@ const mov = (id, fecha, desc, cat, monto, tipo = "Egreso", extra = {}) => ({ id,
 const conMovs = (movs, cfg) => ({ [LKEY]: JSON.stringify({ movs, cfg: { v: 2, ...(cfg || {}) } }) });
 const cerca = (a, b, msg) => assert.ok(Math.abs(a - b) < 1e-6, msg || `${a} ≠ ${b}`);
 
+/* ---- Diagnóstico de inversiones reales: node tests/run.js datos.json [respaldo.json] ----
+   Solo lee e imprime en pantalla: no escribe archivos ni modifica datos. datos.json = filas de la hoja
+   [fecha, desc, cat, cantidad, tipo, cuenta] (o el objeto {filas} que guarda la app en localStorage). respaldo.json =
+   el respaldo que descarga la app en Más › Respaldo, para usar tus reglas de instrumentos en vez de las predeterminadas.
+   Sirve para encontrar reglas faltantes sin revisar mes por mes: lista cada descripción Sin clasificar o Por revisar. */
+function diagnosticoInversiones(filas, api) {
+  const all = api.filas(), inv = api.S.cfg.inversion;
+  const rows = all.filter(r => r.tipo === "Egreso" && r.cat === "Inversion");
+  const total = rows.reduce((s, r) => s + r.monto, 0);
+  const porAnio = {};
+  all.forEach(r => { (porAnio[r.y] ||= { inv: 0, ing: 0, n: 0 }); if (r.tipo === "Ingreso") porAnio[r.y].ing += r.monto; else if (r.cat === "Inversion") { porAnio[r.y].inv += r.monto; porAnio[r.y].n++; } });
+  const porInst = {}, sin = {}, rev = {};
+  rows.forEach(r => {
+    const k = api.instrumento(r.desc, inv.instrumentos), d = (r.desc || "—").toUpperCase();
+    porInst[k] = (porInst[k] || 0) + r.monto;
+    const bolsa = k === "Sin clasificar" ? sin : k === "Por revisar" ? rev : null;
+    if (bolsa) { (bolsa[d] ||= { n: 0, monto: 0, coincide: [...api.candidatosInstrumento(r.desc, inv.instrumentos)] }); bolsa[d].n++; bolsa[d].monto += r.monto; }
+  });
+  // Diferencias contra lo registrado como inversión en la hoja: categorías que parecen inversión pero no se reconocen
+  // (se quedan fuera del total) y filas con Tipo Ingreso y categoría Inversion (la app las cuenta como ingreso).
+  const variantes = {}, comoIngreso = { n: 0, monto: 0 };
+  filas.forEach(f => {
+    const c = String(f[2] || "").trim(); if (!c.toLowerCase().startsWith("invers")) return;
+    if (api.normTipo(f[4], f[2]) === "Ingreso") { comoIngreso.n++; comoIngreso.monto += +f[3] || 0; return; }
+    (variantes[c] ||= { n: 0, monto: 0, reconocida: api.normCat(c, "Egreso") === "Inversion" }); variantes[c].n++; variantes[c].monto += +f[3] || 0;
+  });
+  const perdido = Object.values(variantes).filter(v => !v.reconocida).reduce((s, v) => s + v.monto, 0);
+  const suma = Object.values(porInst).reduce((s, v) => s + v, 0);
+  const lista = o => Object.entries(o).map(([desc, v]) => ({ desc, ...v })).sort((a, b) => b.monto - a.monto);
+  return { total, n: rows.length, porAnio, porInst, sin: lista(sin), rev: lista(rev), variantes, perdido, comoIngreso, cuadra: Math.abs(suma - total) < 0.01 };
+}
+function imprimirDiagnostico(d) {
+  const $ = v => "$" + Math.round(v).toLocaleString("en-US"), pc = (a, b) => b ? Math.round(a / b * 100) + "%" : "—";
+  console.log("\nDiagnóstico de inversiones (solo lectura: nada se guarda ni se sube)");
+  console.log(`  Total invertido (Tipo Egreso + categoría Inversion): ${$(d.total)} en ${d.n} movimientos`);
+  console.log("  Por año: " + Object.keys(d.porAnio).sort().map(y => `${y} ${$(d.porAnio[y].inv)} (${pc(d.porAnio[y].inv, d.porAnio[y].ing)} del ingreso)`).join(" · "));
+  console.log("  Por instrumento: " + Object.entries(d.porInst).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k} ${$(v)} (${pc(v, d.total)})`).join(" · "));
+  const bloque = (titulo, arr, extra) => { console.log(`  ${titulo}: ${arr.length ? "" : "ninguna"}`); arr.forEach(x => console.log(`     ${x.desc.padEnd(30)} ${String(x.n).padStart(3)} ${x.n === 1 ? "vez  " : "veces"} ${$(x.monto).padStart(11)}${extra ? "   " + extra(x) : ""}`)); };
+  bloque("Sin clasificar (agrega la palabra en Más › Ajustes › Instrumentos)", d.sin);
+  bloque("Por revisar (la descripción coincide con varios instrumentos)", d.rev, x => "coincide con " + x.coincide.join(", "));
+  console.log("  Diferencias contra lo registrado como inversión:");
+  const noRec = Object.entries(d.variantes).filter(([, v]) => !v.reconocida);
+  console.log(noRec.length ? "     ✗ categorías que parecen inversión y NO se reconocen (quedan fuera del total): " + noRec.map(([c, v]) => `"${c}" ${v.n} filas, ${$(v.monto)}`).join(" · ")
+    : "     ✓ todas las variantes de categoría se reconocen: " + Object.keys(d.variantes).map(c => `"${c}"`).join(", "));
+  console.log(d.comoIngreso.n ? `     ! ${d.comoIngreso.n} filas con Tipo Ingreso y categoría Inversion por ${$(d.comoIngreso.monto)}: la app las cuenta como ingreso, no como inversión` : "     ✓ ninguna fila de inversión con Tipo Ingreso");
+  console.log(`     ${d.cuadra ? "✓" : "✗"} instrumentos + Sin clasificar + Por revisar ${d.cuadra ? "=" : "≠"} total invertido`);
+}
+
 let n = 0;
 const t = async (name, fn) => { await fn(); n++; console.log("✓", name); };
 
@@ -266,12 +314,31 @@ const t = async (name, fn) => { await fn(); n++; console.log("✓", name); };
     const { api: a } = cargar(conMovs([ingMov("i", ymHoy + "-01", 10000), invMov("a", ymHoy + "-02", "NU", 500), invMov("b", ymHoy + "-03", "aportación", 100),
       ingMov("i2", "2025-03-01", 5000), invMov("c", "2025-03-05", "CETES", 800)]));
     a.S.an.anio = "Todos";
-    const html = a.anInversion();
+    const html = a.anInversion(), enero = ymHoy.endsWith("-01");
     assert.ok(html.includes("Te faltan") && html.includes("Sin clasificar") && html.includes("Meta estimada") && html.includes('id="fAnio"'));
-    assert.ok(html.includes("CETES") && html.includes("Meta vs invertido"));
+    assert.ok(html.includes("CETES") && html.includes("Meta vs invertido") && html.includes("contando solo meses con ingresos"));
+    // Por año: el año en curso mezcla meses estimados y el registrado (salvo en enero, que queda registrado completo)
+    assert.ok(enero ? html.includes("Meta registrada") : html.includes(ymHoy.slice(0, 4) + " mezcla meses estimados y registrados") && !html.includes("Meta registrada"));
     a.S.an.anio = ymHoy.slice(0, 4);
-    assert.ok(a.anInversion().includes("Ene"));
+    const anual = a.anInversion();
+    assert.ok(anual.includes("Ene") && anual.includes("Meta registrada") && (enero || (anual.includes("Meta estimada") && anual.includes("· meta estimada"))));
     assert.ok(a.viewInicio().includes('data-vista="inversion"'));                 // Inicio solo gana el enlace al detalle
+  });
+  await t("diagnóstico de inversiones reales: por año, por instrumento, sin clasificar, por revisar y variantes de categoría", () => {
+    const filas = [["2025-01-01", "NOMINA", "Ingreso", 10000, "Ingreso", "C"], ["2025-01-05", "NU", "Inversion", 1200, "Egreso", "C"], ["2025-01-06", "CETES", "Inversión", 500, "Egreso", "C"],
+      ["2025-02-01", "NOMINA", "Ingreso", 10000, "Ingreso", "C"], ["2025-02-07", "APORTACION", "Inversion", 300, "Egreso", "C"], ["2025-02-08", "TRASPASO GBM A NU", "Inversion", 200, "Egreso", "C"],
+      ["2025-02-09", "GBM", "Inversiones", 700, "Egreso", "C"],                 // variante que no se reconoce: queda fuera del total
+      ["2025-02-10", "RETIRO NU", "Inversion", 400, "Ingreso", "C"],            // Tipo Ingreso: la app la cuenta como ingreso
+      ["2026-03-05", "BITSO", "Inversion", 1000, "Egreso", "C"]];
+    const { api: a } = cargar({ [DKEY]: JSON.stringify({ leido: "2099-01-01", filas }) });
+    const d = diagnosticoInversiones(filas, a);
+    cerca(d.total, 3200); assert.strictEqual(d.n, 5); assert.ok(d.cuadra);
+    cerca(d.porAnio[2025].inv, 2200); cerca(d.porAnio[2025].ing, 20400); cerca(d.porAnio[2026].inv, 1000);
+    cerca(d.porInst.NU, 1200); cerca(d.porInst.CETES, 500); cerca(d.porInst.Bitcoin, 1000); cerca(d.porInst["Sin clasificar"], 300); cerca(d.porInst["Por revisar"], 200);
+    assert.deepStrictEqual(d.sin.map(x => [x.desc, x.n, x.monto]), [["APORTACION", 1, 300]]);
+    assert.deepStrictEqual(d.rev.map(x => [x.desc, x.coincide.slice().sort()]), [["TRASPASO GBM A NU", ["GBM", "NU"]]]);
+    assert.strictEqual(d.variantes["Inversiones"].reconocida, false); cerca(d.perdido, 700); assert.strictEqual(d.variantes["Inversión"].reconocida, true);
+    assert.strictEqual(d.comoIngreso.n, 1); cerca(d.comoIngreso.monto, 400);
   });
 
   /* ---- Gráficas ---- */
@@ -288,11 +355,14 @@ const t = async (name, fn) => { await fn(); n++; console.log("✓", name); };
     assert.ok(barsH([["Comida", 10]], 10, { drill: true }).includes('data-vista="categorias"'));
   });
 
-  /* ---- Comparación con Power BI (opcional) ---- */
-  const datos = process.argv[2];
+  /* ---- Con tus datos reales (opcional): diagnóstico de inversiones y comparación con Power BI ---- */
+  const datos = process.argv[2], respaldo = process.argv[3];
   if (datos) {
-    const filas = JSON.parse(fs.readFileSync(datos, "utf8"));
-    const { api: a } = cargar({ [DKEY]: JSON.stringify({ leido: "2099-01-01", filas }) });
+    const crudo = JSON.parse(fs.readFileSync(datos, "utf8")), filas = Array.isArray(crudo) ? crudo : crudo.filas;
+    const store = { [DKEY]: JSON.stringify({ leido: "2099-01-01", filas }) };
+    if (respaldo) { const b = JSON.parse(fs.readFileSync(respaldo, "utf8")); store[LKEY] = JSON.stringify({ movs: [], cfg: { ...b.cfg, sync: { url: "", clave: "" } } }); }   // solo tus reglas; sin movimientos locales ni conexión
+    const { api: a } = cargar(store);
+    imprimirDiagnostico(diagnosticoInversiones(filas, a));
     const pbi = { 2022: [224953, 153990], 2023: [487995, 386184], 2024: [746131, 596583], 2025: [528220, 475092] };
     await t("totales por año = Power BI (±$2)", () => {
       for (const [y, [i, e]] of Object.entries(pbi)) {

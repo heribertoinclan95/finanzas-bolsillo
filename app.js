@@ -201,12 +201,15 @@ function resumenMes(ym, hoy) {
 /* ---------- Inversión: meta por mes, instrumentos e historial (funciones puras, probadas en tests/run.js) ---------- */
 const SIN_CLASIF = "Sin clasificar", POR_REVISAR = "Por revisar";
 const normTxt = s => String(s || "").toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/[^a-z0-9]+/g, " ").trim();
-// Instrumento de una inversión según su descripción: palabra completa, sin acentos ni mayúsculas ("nu" no es "nuevo").
-// Sin coincidencia → Sin clasificar. Coincide con dos o más → Por revisar: no se asigna a ninguno.
-function instrumento(desc, instrumentos) {
+// Instrumentos cuyas palabras aparecen completas en la descripción, sin acentos ni mayúsculas ("nu" no es "nuevo").
+function candidatosInstrumento(desc, instrumentos) {
   const t = " " + normTxt(desc) + " ";
-  const cand = Object.entries(instrumentos || S.cfg.inversion.instrumentos || {})
+  return Object.entries(instrumentos || S.cfg.inversion.instrumentos || {})
     .filter(([, ws]) => (ws || []).some(w => { const k = normTxt(w); return k && t.includes(" " + k + " "); })).map(([n]) => n);
+}
+// Instrumento de una inversión: sin coincidencia → Sin clasificar; dos o más → Por revisar, no se asigna a ninguno.
+function instrumento(desc, instrumentos) {
+  const cand = candidatosInstrumento(desc, instrumentos);
   return cand.length === 1 ? cand[0] : cand.length ? POR_REVISAR : SIN_CLASIF;
 }
 // Guarda el % vigente y desde qué mes aplica. Los meses anteriores conservan su %: nunca se reescriben.
@@ -612,25 +615,36 @@ function anInversion() {
     const prom = promIngresos3m(all, ym);   // ingresos extra: más de 5% arriba del promedio de los 3 meses anteriores con ingresos
     if (prom && r.ingresos > prom * 1.05) sug.push(`Este mes recibiste <b class="num">${fmt.format(r.ingresos - prom)}</b> más que tu ingreso habitual; tu meta subió <b class="num">${fmt.format((r.ingresos - prom) * r.pct)}</b>.`);
   }
-  // Historial según el filtro de año: 12 meses del año elegido o un punto por año con "Todos".
+  // Historial según el filtro de año: 12 meses del año elegido o un punto por año con "Todos". Un periodo es "estimado"
+  // si alguna de sus metas lo es; un año que mezcla meses estimados y registrados va como estimado y la nota lo dice.
   const ys = years(), anio = S.an.anio;
   const slicer = `<div class="slicers"><label class="field"><span class="label">Año</span><select id="fAnio">${["Todos", ...ys.map(String)].map(a => `<option ${a === anio ? "selected" : ""}>${a}</option>`).join("")}</select></label></div>`;
-  let labels, names, metaS, invS, enPeriodo;
+  let labels, names, periodos, enPeriodo;
   if (anio === "Todos") {
-    const porY = {}; h.meses.forEach(m => { const y = m.ym.slice(0, 4); (porY[y] ||= { meta: 0, inv: 0 }); porY[y].meta += m.meta; porY[y].inv += m.invertido; });
+    const porY = {}; h.meses.forEach(m => { const y = m.ym.slice(0, 4); (porY[y] ||= { meta: 0, inv: 0, n: 0, est: 0 }); porY[y].meta += m.meta; porY[y].inv += m.invertido; porY[y].n++; if (m.estimado) porY[y].est++; });
     labels = Object.keys(porY).sort(); names = labels;
-    metaS = labels.map(y => porY[y].meta); invS = labels.map(y => porY[y].inv); enPeriodo = h.meses;
+    periodos = labels.map(y => ({ meta: porY[y].meta, inv: porY[y].inv, estimado: porY[y].est > 0, mixto: porY[y].est > 0 && porY[y].est < porY[y].n }));
+    enPeriodo = h.meses;
   } else {
-    const y = +anio, find = i => h.meses.find(m => m.ym === y + "-" + pad(i + 1));
+    const y = +anio;
     labels = MES3; names = MESES.map(m => m + " " + y);
-    metaS = MES3.map((_, i) => { const m = find(i); return m ? m.meta : null; }); invS = MES3.map((_, i) => { const m = find(i); return m ? m.invertido : null; });
+    periodos = MES3.map((_, i) => { const m = h.meses.find(x => x.ym === y + "-" + pad(i + 1)); return m ? { meta: m.meta, inv: m.invertido, estimado: m.estimado } : null; });
     enPeriodo = h.meses.filter(m => m.ym.slice(0, 4) === anio);
   }
+  const metaS = periodos.map(p => p ? p.meta : null), invS = periodos.map(p => p ? p.inv : null);
+  // Dos series de meta para que leyenda, tooltip y "Ver datos" distingan la estimada de la registrada.
+  const metaEst = periodos.map(p => p && p.estimado ? p.meta : null), metaReg = periodos.map(p => p && !p.estimado ? p.meta : null);
+  const series = [];
+  if (metaEst.some(v => v != null)) series.push({ name: "Meta estimada", values: metaEst, color: "var(--muted)" });
+  if (metaReg.some(v => v != null)) series.push({ name: "Meta registrada", values: metaReg, color: "var(--ink)" });
+  series.push({ name: "Invertido", values: invS, color: "var(--accent)", bold: true });
+  const nombres = names.map((n, i) => periodos[i] && periodos[i].estimado ? n + " · meta estimada" : n);   // tooltip y Ver datos de la gráfica de diferencia
   const perInv = enPeriodo.reduce((a, m) => a + m.invertido, 0), perMeta = enPeriodo.reduce((a, m) => a + m.meta, 0);
   const cerradosConMeta = enPeriodo.filter(m => m.meta > 0 && m.ym !== ym).length;
   const debajo = h.porDebajo.filter(m => anio === "Todos" || m.ym.slice(0, 4) === anio);
-  const estim = enPeriodo.filter(m => m.estimado), desde = inv.metas[0].desde;
-  const notaEst = estim.length ? `<p class="note">Meta estimada hasta ${monthLabel(shiftMonth(desde, -1))}: no hay registro de tu porcentaje en esos meses, se usa el ${Math.round(estim[0].pct * 100)}% que tenías al estrenar este historial. Desde ${monthLabel(desde)} la meta es la registrada.</p>` : "";
+  const estim = enPeriodo.filter(m => m.estimado), todoEst = estim.length > 0 && estim.length === enPeriodo.length, desde = inv.metas[0].desde;
+  const mixtos = anio === "Todos" ? labels.filter((_, i) => periodos[i].mixto) : [];
+  const notaEst = estim.length ? `<p class="note">Meta estimada hasta ${monthLabel(shiftMonth(desde, -1))}, con el ${Math.round(estim[0].pct * 100)}% que tenías al estrenar este historial: no hay registro de tu porcentaje en esos meses. Desde ${monthLabel(desde)} la meta es la registrada.${mixtos.length ? ` ${mixtos.join(" y ")} mezcla meses estimados y registrados.` : ""}</p>` : "";
   const movsPer = all.filter(x => x.tipo === "Egreso" && x.cat === "Inversion" && x.fecha.slice(0, 7) <= ym && (anio === "Todos" || x.y === +anio));
   const dPer = distribucion(movsPer, perMeta, inv);
   const barras = dPer.filas.filter(f => f.real > 0).map(f => [f.pct > 0 ? `${f.nombre} · meta ${Math.round(f.pct * 100)}%` : f.nombre, f.real]);
@@ -658,13 +672,14 @@ function anInversion() {
   </section>
   ${slicer}
   <div class="kpis">
-    <div class="pill"><span class="label">Racha</span><span class="v num">${h.racha} mes${h.racha === 1 ? "" : "es"}</span><small class="sub">seguidos cumpliendo la meta</small></div>
+    <div class="pill"><span class="label">Racha</span><span class="v num">${h.racha} mes${h.racha === 1 ? "" : "es"}</span><small class="sub">cumpliendo la meta, contando solo meses con ingresos</small></div>
     <div class="pill"><span class="label">Proyección 12 meses</span><span class="v num">${fmt.format(h.proyeccion12)}</span><small class="sub">${h.mesesRitmo ? `aportando ${fmt.format(h.ritmo)}/mes, sin rendimientos` : "aún sin meses cerrados"}</small></div>
-    <div class="pill"><span class="label">Invertido ${anio === "Todos" ? "en total" : "en " + anio}</span><span class="v num">${fmt.format(perInv)}</span><small class="sub">${pct(perInv, perMeta)} de ${fmt.format(perMeta)} de meta</small></div>
+    <div class="pill"><span class="label">Invertido ${anio === "Todos" ? "en total" : "en " + anio}</span><span class="v num">${fmt.format(perInv)}</span><small class="sub">${pct(perInv, perMeta)} de ${fmt.format(perMeta)} de meta${estim.length ? (todoEst ? " estimada" : ", parte estimada") : ""}</small></div>
     <div class="pill"><span class="label">Meses por debajo</span><span class="v num${debajo.length ? " neg" : ""}">${debajo.length}</span><small class="sub">de ${cerradosConMeta} cerrados con meta</small></div>
   </div>
-  <section class="card"><h3>Meta vs invertido</h3>${lineChart([{ name: "Meta", values: metaS, color: "var(--muted)" }, { name: "Invertido", values: invS, color: "var(--accent)", bold: true }], labels, { label: "Meta e inversión por periodo", names })}${notaEst}</section>
-  <section class="card"><h3>Diferencia contra la meta</h3><p class="note">Lo que invertiste de más (verde) o de menos (rojo) en cada ${anio === "Todos" ? "año" : "mes"}.</p>${colChart(invS.map((v, i) => v == null ? 0 : v - (metaS[i] || 0)), labels, { posneg: true, label: "Diferencia contra la meta", names, serie: "Diferencia" })}</section>
+  ${notaEst}
+  <section class="card"><h3>Meta vs invertido</h3>${lineChart(series, labels, { label: "Meta e inversión por periodo", names })}</section>
+  <section class="card"><h3>Diferencia contra la meta</h3><p class="note">Lo que invertiste de más (verde) o de menos (rojo) en cada ${anio === "Todos" ? "año" : "mes"}.</p>${colChart(invS.map((v, i) => v == null ? 0 : v - (metaS[i] || 0)), labels, { posneg: true, label: "Diferencia contra la meta", names: nombres, serie: "Diferencia" })}</section>
   ${debajo.length ? `<section class="card"><h3>Meses por debajo de la meta</h3><div class="mini">${debajo.slice(0, 8).map(m => `<div class="mrow"><span class="d"><strong>${esc(monthLabel(m.ym))}</strong><small>${fmt.format(m.invertido)} de ${fmt.format(m.meta)}${m.estimado ? " · meta estimada" : ""}</small></span><span class="num neg">${signo(m.diferencia)}</span></div>`).join("")}</div>${debajo.length > 8 ? `<p class="note">y ${debajo.length - 8} más.</p>` : ""}</section>` : ""}
   ${barras.length ? `<section class="card"><h3>Por instrumento ${anio === "Todos" ? "en total" : "en " + anio}</h3>${barsH(barras, dPer.total)}<p class="note" style="margin-top:10px">El porcentaje es de lo invertido en el periodo; compáralo con la meta de cada instrumento.</p></section>` : ""}`;
 }
@@ -1089,5 +1104,5 @@ if (datosViejos()) readSheet(true);
 
 // Funciones puras para pruebas en Node
 if (typeof module !== "undefined") module.exports = { parseQuick, toRow, toTSV, normTipo, normCat, S, filas, migrate, margen, promIngresos3m, resumenMes, lineChart, colChart, barsH, sendPending, render,
-  ensureInversion, instrumento, registrarMeta, pctObjetivo, inversionMes, distribucion, historialInversion, parseInstrumentos, anInversion, viewInicio };
+  ensureInversion, candidatosInstrumento, instrumento, registrarMeta, pctObjetivo, inversionMes, distribucion, historialInversion, parseInstrumentos, anInversion, viewInicio };
 })();
