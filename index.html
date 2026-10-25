@@ -46,11 +46,7 @@
 <div id="sheetHost"></div>
 <div class="toast" id="toast" hidden></div>
 
+<!-- El service worker se registra desde app.js: la CSP de _headers no permite scripts en línea. -->
 <script src="app.js"></script>
-<script>
-if ("serviceWorker" in navigator) {
-  window.addEventListener("load", () => navigator.serviceWorker.register("sw.js").catch(() => {}));
-}
-</script>
 </body>
 </html>

@@ -4,3 +4,5 @@ node_modules/
 finanzas-respaldo-*.json
 datos.json
 datos-*.json
+.wrangler/
+.dev.vars

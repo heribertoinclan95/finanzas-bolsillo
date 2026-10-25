@@ -1,7 +1,8 @@
 /**
  * Puente entre la app Finanzas de Bolsillo y tu Google Sheet "Finanzas 2026".
  * Se pega en Extensiones → Apps Script de esa hoja y se publica como app web
- * (Ejecutar como: Yo · Acceso: Cualquier usuario).
+ * (Ejecutar como: Yo · Acceso: Cualquier usuario). La app no lo llama directo: lo hace el Worker de
+ * Cloudflare (worker/index.mjs), que guarda la URL y la clave como secretos del servidor.
  *
  * Acciones:
  *   ping     → confirma conexión
@@ -13,12 +14,15 @@
 
 const HOJA = 'Movimientos';      // pestaña donde la app agrega movimientos
 const HISTORICO = 'Historico';   // pestaña con 2022–2025 (opcional)
-const CLAVE = 'CAMBIA-ESTA-CLAVE'; // la misma que pones en la app
+// Clave compartida con el Worker. Ponla en Configuración del proyecto → Propiedades del script con el
+// nombre CLAVE, para que no viva en el código. Si no existe la propiedad se usa la constante de abajo.
+const CLAVE_RESPALDO = 'CAMBIA-ESTA-CLAVE';
+function clave_() { return PropertiesService.getScriptProperties().getProperty('CLAVE') || CLAVE_RESPALDO; }
 
 function doPost(e) {
   try {
     const body = JSON.parse(e.postData.contents);
-    if (body.clave !== CLAVE) return out({ ok: false, error: 'Clave incorrecta' });
+    if (!body.clave || String(body.clave) !== clave_()) return out({ ok: false, error: 'Clave incorrecta' });
 
     const ss = SpreadsheetApp.getActive();
     const hoja = ss.getSheetByName(HOJA);

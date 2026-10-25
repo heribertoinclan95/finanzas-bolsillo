@@ -1,4 +1,5 @@
-// Pruebas sin dependencias: carga app.js con un DOM falso y revisa las funciones puras.
+// Pruebas sin dependencias: carga app.js con un DOM falso y revisa las funciones puras; también el Worker
+// (worker/index.mjs, con un JWT firmado aquí mismo) y el service worker (sw.js) con red y caché falsas.
 // Opcional: node tests/run.js ruta/a/datos.json  → compara totales por año con los de Power BI.
 const fs = require("fs");
 const path = require("path");
@@ -113,7 +114,7 @@ const t = async (name, fn) => { await fn(); n++; console.log("✓", name); };
     assert.strictEqual(normCat("comida", "Egreso"), "Comida"); assert.strictEqual(normCat("SALIDA", "Egreso"), "Salida");
     assert.strictEqual(normCat("Libro", "Egreso"), "Libros"); assert.strictEqual(normCat("Otros", "Ingreso"), "Ingreso");
   });
-  await t("migración v1 → v2: Ingresos → Ingreso, Salud y bienestar → Salud", () => {
+  await t("migración v1 → v3: Ingresos → Ingreso, Salud y bienestar → Salud, modo de conexión", () => {
     const store = { [LKEY]: JSON.stringify({
       movs: [{ id: "1", fecha: "2026-10-01", desc: "nomina", cat: "Ingreso", monto: 100, tipo: "Ingresos", exportado: true },
              { id: "2", fecha: "2026-10-02", desc: "farmacia", cat: "Salud y bienestar", monto: 50, tipo: "Egreso", exportado: false }],
@@ -122,7 +123,7 @@ const t = async (name, fn) => { await fn(); n++; console.log("✓", name); };
     assert.strictEqual(a.S.movs[0].tipo, "Ingreso"); assert.strictEqual(a.S.movs[1].cat, "Salud");
     assert.ok(a.S.cfg.categorias.includes("Salud") && !a.S.cfg.categorias.includes("Salud y bienestar"));
     assert.ok(a.S.cfg.categorias.includes("Inversion")); assert.strictEqual(a.S.cfg.sync.url, "u");
-    assert.strictEqual(a.S.cfg.v, 2);
+    assert.strictEqual(a.S.cfg.v, 3);   // con URL y clave sigue en modo directo
   });
   await t("dashboards no duplican lo ya enviado a la hoja", () => {
     const store = {
@@ -239,7 +240,7 @@ const t = async (name, fn) => { await fn(); n++; console.log("✓", name); };
     cerca(a.filas().reduce((tot, r) => tot + r.monto, 0), 30);          // enviados después de la última lectura: cuentan una sola vez
     const guardado = JSON.parse(s[LKEY]);
     assert.deepStrictEqual(Object.keys(guardado).sort(), ["cfg", "movs"]);
-    assert.strictEqual(guardado.movs.length, 2); assert.strictEqual(guardado.cfg.v, 2);
+    assert.strictEqual(guardado.movs.length, 2); assert.strictEqual(guardado.cfg.v, 3);
     assert.strictEqual(new Set(guardado.movs.map(m => m.id)).size, 2);
     assert.deepStrictEqual(Object.keys(guardado.movs[0]).sort(), ["cat", "creado", "cuenta", "desc", "enviado", "exportado", "fecha", "id", "monto", "tipo"]);
     enviadas = null; await a.sendPending(); assert.strictEqual(enviadas, null);   // ya no hay pendientes: no se llama a la hoja
@@ -322,14 +323,14 @@ const t = async (name, fn) => { await fn(); n++; console.log("✓", name); };
   });
   await t("migración de inversión: completa lo que falta sin depender de cfg.v, es idempotente y no toca movimientos", () => {
     const movs = [mov("a", "2026-10-01", "x", "Comida", 10), invMov("b", "2026-10-02", "NU", 20)];
-    for (const v of [2, 3]) {   // la fase de seguridad también sube cfg.v a 3: debe dar igual
+    for (const v of [2, 3]) {   // venga en v2 o v3, la migración de seguridad lo deja en 3 y la de inversión completa lo suyo igual
       const store = { [LKEY]: JSON.stringify({ movs, cfg: { v, cuentas: ["C"], categorias: ["Comida", "Inversion", "Otros"], reglas: {}, inversion: { pct: 0.15, reparto: [["NU", 0.5], ["Vanguard", 0.5]] }, sync: { url: "u", clave: "c" } } }) };
       const { api: a, store: s } = cargar(store);
       const inv = a.S.cfg.inversion;
       cerca(inv.pct, 0.15); assert.deepStrictEqual([...inv.reparto.map(r => r[0])], ["NU", "Vanguard"]);
       assert.deepStrictEqual([...inv.instrumentos.Vanguard], ["vanguard"]); assert.deepStrictEqual([...inv.instrumentos.CETES], ["cetes", "cetesdirecto"]);
       assert.deepStrictEqual(JSON.parse(JSON.stringify(inv.metas)), [{ desde: ymHoy, pct: 0.15 }]);
-      assert.strictEqual(a.S.cfg.v, v); assert.strictEqual(a.S.cfg.sync.url, "u");
+      assert.strictEqual(a.S.cfg.v, 3); assert.strictEqual(a.S.cfg.sync.url, "u");
       assert.strictEqual(JSON.stringify(JSON.parse(s[LKEY]).movs), JSON.stringify(movs));
       const antes = s[LKEY]; a.migrate(); assert.strictEqual(s[LKEY], antes);   // segunda pasada: nada cambia
     }
@@ -365,6 +366,174 @@ const t = async (name, fn) => { await fn(); n++; console.log("✓", name); };
     assert.deepStrictEqual(d.rev.map(x => [x.desc, x.coincide.slice().sort()]), [["TRASPASO GBM A NU", ["GBM", "NU"]]]);
     assert.strictEqual(d.variantes["Inversiones"].reconocida, false); cerca(d.perdido, 700); assert.strictEqual(d.variantes["Inversión"].reconocida, true);
     assert.strictEqual(d.comoIngreso.n, 1); cerca(d.comoIngreso.monto, 400);
+  });
+
+  /* ---- Seguridad: migración v3 reversible, modo Worker, respaldo y código sin secretos ---- */
+  await t("migración v2 → v3 conserva URL y clave en el cel (modo directo); sin credenciales arranca en modo Worker", () => {
+    const { api: a } = cargar(conMovs([], { sync: { url: "https://script.google.com/x", clave: "k" } }));
+    assert.strictEqual(a.S.cfg.v, 3); assert.strictEqual(a.modoWorker(), false);
+    assert.strictEqual(a.S.cfg.sync.url, "https://script.google.com/x"); assert.strictEqual(a.S.cfg.sync.clave, "k");
+    const { api: b } = cargar(conMovs([]));
+    assert.strictEqual(b.S.cfg.sync.modo, "worker"); assert.strictEqual(b.S.cfg.sync.url, "");
+    const { api: c } = cargar({ [LKEY]: JSON.stringify({ movs: [], cfg: { v: 3, sync: { modo: "worker", url: "u", clave: "c" } } }) });
+    assert.strictEqual(c.S.cfg.sync.modo, "worker"); assert.strictEqual(c.S.cfg.sync.url, "u");   // v3 ya migrado: no se toca
+    assert.strictEqual(cargar().api.S.cfg.sync.modo, "worker");                                      // app nueva
+  });
+  await t("modo Worker: manda a api/hoja sin clave ni URL de Google; 401 y 503 dejan los pendientes intactos", async () => {
+    const store = conMovs([mov("a", "2026-10-01", "x", "Comida", 10)], { v: 3, sync: { modo: "worker", url: "", clave: "" } });
+    const llamadas = [];
+    let respuesta = { status: 401, json: () => Promise.resolve({ ok: false, error: "Sesión no válida" }) };
+    const red = (url, opts) => { llamadas.push({ url, opts }); return Promise.resolve(respuesta); };
+    const { api: a, store: s } = cargar(store, red);
+    assert.strictEqual(a.conectada(), true);
+    await a.sendPending();
+    const envios = llamadas.filter(l => JSON.parse(l.opts.body).accion === "agregar");   // al arrancar la app también pide "leer"
+    assert.strictEqual(envios.length, 1); assert.ok(llamadas.every(l => l.url === "api/hoja"));
+    const body = JSON.parse(envios[0].opts.body);
+    assert.ok(!("clave" in body) && !("url" in body)); assert.strictEqual(body.filas.length, 1);
+    assert.strictEqual(envios[0].opts.headers["X-Requested-With"], "XMLHttpRequest");
+    assert.strictEqual(a.S.movs[0].exportado, false); assert.strictEqual(a.S.sesion.estado, "vencida");
+    assert.strictEqual(JSON.parse(s[LKEY]).movs[0].exportado, false);
+    respuesta = { status: 200, ok: true, json: () => Promise.resolve({ ok: true, ids: ["a"], agregadas: 1, repetidas: 0 }) };
+    await a.sendPending();
+    assert.strictEqual(a.S.movs[0].exportado, true); assert.strictEqual(a.S.sesion.estado, "activa");
+    respuesta = { status: 503, json: () => Promise.resolve({ ok: false, error: "El Worker aún no tiene configurada la hoja" }) };
+    a.S.movs.push(mov("b", "2026-10-02", "y", "Comida", 5)); await a.sendPending();
+    assert.strictEqual(a.S.movs[1].exportado, false); assert.strictEqual(a.S.sesion.estado, "sin-worker"); assert.strictEqual(a.conectada(), false);
+  });
+  await t("el respaldo no incluye URL ni clave del Apps Script", () => {
+    const { api: a } = cargar(conMovs([mov("a", "2026-10-01", "x", "Comida", 10)], { sync: { url: "https://script.google.com/x", clave: "k" } }));
+    const r = a.respaldoJSON();
+    assert.strictEqual(r.cfg.sync.url, ""); assert.strictEqual(r.cfg.sync.clave, ""); assert.strictEqual(r.cfg.sync.modo, "directo"); assert.strictEqual(r.movs.length, 1);
+    assert.ok(!JSON.stringify(r).includes("script.google.com"));
+  });
+  await t("el código público no trae URL de despliegue de Apps Script, clave ni secretos en wrangler", () => {
+    const publicos = ["app.js", "index.html", "sw.js", "styles.css", "manifest.webmanifest", "_headers", "wrangler.jsonc", "worker/index.mjs"];
+    for (const f of publicos) {
+      const src = fs.readFileSync(path.join(__dirname, "..", f), "utf8");
+      assert.ok(!/script\.google\.com\/macros\/s\/[A-Za-z0-9_-]{20,}/.test(src), f + " trae una URL /exec real");
+      assert.ok(!/AKfycb[\w-]{10,}/.test(src), f + " trae un id de despliegue");
+      assert.ok(!/cloudflareaccess\.com/.test(src.replace(/<equipo>|heri\.cloudflareaccess/g, "")) || f === "worker/index.mjs", f + " trae el dominio del equipo");
+    }
+    const wr = fs.readFileSync(path.join(__dirname, "..", "wrangler.jsonc"), "utf8");
+    assert.ok(!/"vars"/.test(wr), "wrangler.jsonc no debe llevar secretos en vars"); assert.ok(/run_worker_first/.test(wr));
+    assert.ok(!/<script>/.test(fs.readFileSync(path.join(__dirname, "..", "index.html"), "utf8")), "index.html sin scripts en línea (CSP)");
+  });
+
+  /* ---- Worker: puente protegido /api/* con JWT de Cloudflare Access ---- */
+  const worker = await import(require("url").pathToFileURL(path.join(__dirname, "..", "worker", "index.mjs")).href);
+  const subtle = globalThis.crypto.subtle;
+  const RSA = { name: "RSASSA-PKCS1-v1_5", modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: "SHA-256" };
+  const par = await subtle.generateKey(RSA, true, ["sign", "verify"]), otro = await subtle.generateKey(RSA, true, ["sign", "verify"]);
+  const jwkPub = async (k, kid) => ({ ...(await subtle.exportKey("jwk", k.publicKey)), kid, use: "sig" });
+  const b64u = buf => Buffer.from(buf).toString("base64url");
+  const firmar = async (claims, k = par, kid = "k1", alg = "RS256") => {
+    const h = b64u(Buffer.from(JSON.stringify({ alg, kid, typ: "JWT" }))), c = b64u(Buffer.from(JSON.stringify(claims)));
+    return h + "." + c + "." + b64u(await subtle.sign("RSASSA-PKCS1-v1_5", k.privateKey, Buffer.from(h + "." + c)));
+  };
+  const EQUIPO = "https://heri.cloudflareaccess.com", AUD = "aud-de-prueba", CORREO = "heri@ejemplo.mx", HOJA = "https://script.google.com/macros/s/PRUEBA/exec";
+  const env = { ACCESS_TEAM: EQUIPO, ACCESS_AUD: AUD, ACCESS_EMAILS: CORREO + ", otro@ejemplo.mx", SCRIPT_URL: HOJA, SCRIPT_CLAVE: "clave-secreta",
+    ASSETS: { fetch: () => new Response("app", { status: 200 }) } };
+  const ahora = Math.floor(Date.now() / 1000);
+  const claims = (extra = {}) => ({ iss: EQUIPO, aud: [AUD], email: CORREO, exp: ahora + 3600, iat: ahora, nbf: ahora, ...extra });
+  const llamadasHoja = [];
+  const redWorker = llaves => async (url, opts) => {
+    if (String(url).endsWith("/cdn-cgi/access/certs")) return Response.json({ keys: llaves });
+    if (url === HOJA) { llamadasHoja.push(JSON.parse(opts.body)); return Response.json({ ok: true, hoja: "Movimientos", agregadas: 1, ids: ["a"] }); }
+    throw new Error("destino inesperado " + url);
+  };
+  const peticion = (token, body = { accion: "ping" }, extra = {}) => new Request("https://finanzas.test/api/hoja", {
+    method: "POST", body: JSON.stringify(body),
+    headers: { "Content-Type": "application/json", "X-Requested-With": "XMLHttpRequest", "Sec-Fetch-Site": "same-origin", ...(token ? { "Cf-Access-Jwt-Assertion": token } : {}), ...extra } });
+  const llaves = [await jwkPub(par, "k1")];
+  const deps = { fetch: redWorker(llaves) };
+
+  await t("Worker: sin JWT responde 401 y no toca la hoja", async () => {
+    const r = await worker.api(peticion(""), env, deps);
+    assert.strictEqual(r.status, 401); assert.strictEqual((await r.json()).codigo, "sin-token"); assert.strictEqual(llamadasHoja.length, 0);
+  });
+  await t("Worker: JWT válido reenvía al Apps Script con la clave del servidor; el cliente nunca la ve", async () => {
+    const tok = await firmar(claims());
+    const r = await worker.api(peticion(tok, { accion: "agregar", filas: [{ id: "a" }] }), env, deps);
+    assert.strictEqual(r.status, 200); const j = await r.json(); assert.strictEqual(j.ok, true); assert.strictEqual(j.agregadas, 1);
+    assert.strictEqual(llamadasHoja.length, 1); assert.strictEqual(llamadasHoja[0].clave, "clave-secreta"); assert.strictEqual(llamadasHoja[0].accion, "agregar");
+    assert.ok(!JSON.stringify(j).includes("clave-secreta")); assert.strictEqual(r.headers.get("Cache-Control"), "no-store");
+    const yo = await (await worker.api(new Request("https://finanzas.test/api/yo", { headers: { "Cf-Access-Jwt-Assertion": tok } }), env, deps)).json();
+    assert.strictEqual(yo.email, CORREO); assert.strictEqual(yo.vence, ahora + 3600);
+  });
+  await t("Worker: rechaza firma ajena, alg distinto, emisor, audiencia, vencimiento, correo no autorizado y token malformado", async () => {
+    const casos = [
+      [await firmar(claims(), otro, "k1"), "firma"],
+      [await firmar(claims(), par, "k1", "none"), "alg"],
+      [await firmar(claims({ iss: "https://otro.cloudflareaccess.com" })), "emisor"],
+      [await firmar(claims({ aud: ["otra-app"] })), "audiencia"],
+      [await firmar(claims({ exp: ahora - 10 })), "vencido"],
+      [await firmar(claims({ email: "intruso@ejemplo.mx" })), "correo"],
+      [await firmar(claims({ email: "" })), "correo"],
+      ["abc.def", "formato"]
+    ];
+    for (const [tok, codigo] of casos) {
+      const r = await worker.api(peticion(tok), env, deps);
+      assert.strictEqual(r.status, 401, codigo); assert.strictEqual((await r.json()).codigo, codigo);
+    }
+    assert.strictEqual(llamadasHoja.length, 1);   // ninguna llegó a la hoja
+  });
+  await t("Worker: kid nuevo vuelve a pedir las llaves (rotación); kid inexistente se rechaza", async () => {
+    const tok2 = await firmar(claims(), otro, "k2");
+    assert.strictEqual((await (await worker.api(peticion(tok2), env, deps)).json()).codigo, "kid");
+    const r2 = await worker.api(peticion(tok2), env, { fetch: redWorker([...llaves, await jwkPub(otro, "k2")]) });
+    assert.strictEqual(r2.status, 200);
+  });
+  await t("Worker: sin configurar responde 503 claro; acción rara 400; otro sitio o sin cabeceras 403; GET 405; /api/entrar regresa a la app", async () => {
+    const tok = await firmar(claims());
+    const sinAccess = await worker.api(peticion(tok), { ...env, ACCESS_AUD: "" }, deps);
+    assert.strictEqual(sinAccess.status, 503); assert.strictEqual((await sinAccess.json()).codigo, "sin-access");
+    const sinHoja = await worker.api(peticion(tok), { ...env, SCRIPT_URL: "" }, deps);
+    assert.strictEqual(sinHoja.status, 503); assert.strictEqual((await sinHoja.json()).codigo, "sin-hoja");
+    assert.strictEqual((await worker.api(peticion(tok, { accion: "borrar" }), env, deps)).status, 400);
+    assert.strictEqual((await worker.api(peticion(tok, { accion: "ping" }, { Origin: "https://malo.test" }), env, deps)).status, 403);
+    const formulario = new Request("https://finanzas.test/api/hoja", { method: "POST", body: '{"accion":"leer"}', headers: { "Content-Type": "text/plain", "Cf-Access-Jwt-Assertion": tok } });
+    assert.strictEqual((await worker.api(formulario, env, deps)).status, 403);
+    assert.strictEqual((await worker.api(new Request("https://finanzas.test/api/hoja", { headers: { "Cf-Access-Jwt-Assertion": tok } }), env, deps)).status, 405);
+    assert.strictEqual((await worker.api(new Request("https://finanzas.test/api/otra", { headers: { "Cf-Access-Jwt-Assertion": tok } }), env, deps)).status, 404);
+    const entrar = await worker.api(new Request("https://finanzas.test/api/entrar", { headers: { "Cf-Access-Jwt-Assertion": tok } }), env, deps);
+    assert.strictEqual(entrar.status, 302); assert.strictEqual(entrar.headers.get("Location"), "https://finanzas.test/");
+    assert.strictEqual((await worker.api(new Request("https://finanzas.test/api/entrar"), env, deps)).status, 401);
+    assert.strictEqual(await (await worker.default.fetch(new Request("https://finanzas.test/index.html"), env)).text(), "app");
+    assert.strictEqual(llamadasHoja.length, 2);   // solo la válida de arriba y la de rotación
+  });
+
+  /* ---- Service worker: nunca guarda redirecciones ni toca /api ---- */
+  function cargarSW(red) {
+    const guardado = {}, handlers = {}, clave = r => typeof r === "string" ? r : r.url;
+    const cache = { put: async (r, res) => { guardado[clave(r)] = res; }, match: async r => guardado[clave(r)], addAll: async () => {} };
+    const ctx = { self: { addEventListener: (k, fn) => { handlers[k] = fn; }, skipWaiting() {}, clients: { claim() {} } },
+      caches: { open: async () => cache, keys: async () => [], delete: async () => true, match: async r => guardado[clave(r)] },
+      location: { origin: "https://finanzas.test" }, URL, fetch: red, Response, console };
+    vm.createContext(ctx); vm.runInContext(fs.readFileSync(path.join(__dirname, "..", "sw.js"), "utf8"), ctx);
+    const pedir = (url, mode = "no-cors") => { let p; handlers.fetch({ request: { url, method: "GET", mode }, respondWith: x => { p = x; } }); return p; };
+    return { guardado, pedir };
+  }
+  await t("service worker: guarda respuestas completas, nunca redirecciones (login de Access), y no intercepta /api ni /cdn-cgi", async () => {
+    const resp = { "https://finanzas.test/app.js": { ok: true, status: 200, redirected: false, type: "basic" },
+      "https://finanzas.test/styles.css": { ok: false, status: 302, redirected: false, type: "basic" },      // Access manda al login
+      "https://finanzas.test/index.html": { ok: true, status: 200, redirected: true, type: "basic" } };      // redirección seguida: ya no es la app
+    for (const r of Object.values(resp)) r.clone = () => r;
+    const sw = cargarSW(req => Promise.resolve(resp[req.url]));   // el service worker llama fetch(request), no fetch(url)
+    assert.strictEqual(await sw.pedir("https://finanzas.test/app.js"), resp["https://finanzas.test/app.js"]);
+    await sw.pedir("https://finanzas.test/styles.css"); await sw.pedir("https://finanzas.test/index.html", "navigate");
+    await new Promise(r => setTimeout(r, 0));
+    assert.deepStrictEqual(Object.keys(sw.guardado), ["https://finanzas.test/app.js"]);
+    assert.strictEqual(sw.pedir("https://finanzas.test/api/hoja"), undefined);               // pasa directo al Worker
+    assert.strictEqual(sw.pedir("https://finanzas.test/cdn-cgi/access/login"), undefined);   // Access sin intermediarios
+  });
+  await t("service worker sin internet: la navegación cae a index.html en caché; un archivo que no está no recibe HTML", async () => {
+    const sw = cargarSW(() => Promise.reject(new Error("sin red")));
+    const index = { ok: true, status: 200, redirected: false, type: "basic", clone() { return this; } };
+    sw.guardado["index.html"] = index;
+    assert.strictEqual(await sw.pedir("https://finanzas.test/", "navigate"), index);
+    const r = await sw.pedir("https://finanzas.test/app.js");
+    assert.strictEqual(r.type, "error");
   });
 
   /* ---- Gráficas ---- */
