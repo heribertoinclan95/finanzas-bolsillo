@@ -910,7 +910,8 @@ async function hashCandado(pass, salB64, iter = CANDADO_ITER) {
 }
 async function verificarCandado(pass, c) { return !c || !c.hash || (await hashCandado(pass, c.sal, c.iter || CANDADO_ITER)).hash === c.hash; }
 const debeBloquear = (desde, ahora) => desde > 0 && ahora - desde >= CANDADO_MS;
-const campoUsuario = () => `<input class="sr" name="usuario" autocomplete="username" value="finanzas" readonly aria-hidden="true" tabindex="-1">`;
+const CANDADO_USUARIO = "heri";   // solo para que Bitwarden guarde la entrada como usuario + contraseña; el candado valida la contraseña
+const campoUsuario = () => `<input class="sr" name="usuario" autocomplete="username" value="${CANDADO_USUARIO}" readonly aria-hidden="true" tabindex="-1">`;
 function viewLock() {
   return `<div class="lock" role="dialog" aria-modal="true" aria-label="Candado"><form class="lockbox" id="lockForm">
     <div class="brand">Finanzas<small>Candado</small></div>

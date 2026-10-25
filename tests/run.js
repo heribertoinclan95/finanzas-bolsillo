@@ -440,6 +440,7 @@ const t = async (name, fn) => { await fn(); n++; console.log("✓", name); };
     assert.strictEqual(a.debeBloquear(0, ahora), false);
     const html = a.viewLock();
     assert.ok(html.includes('autocomplete="current-password"') && html.includes('autocomplete="username"') && html.includes('type="password"'));
+    assert.ok(html.includes('value="heri"'));                                              // usuario fijo para Bitwarden
   });
   await t("con candado guardado la app arranca bloqueada, no pinta movimientos y abre al desbloquear", async () => {
     const c = await cargar().api.hashCandado("secreta123");
