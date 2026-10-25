@@ -227,4 +227,22 @@ button.bar{border:0;background:none;padding:0;width:100%;text-align:left;font:in
 .verdatos[open] summary::before{content:"▾"}
 .verdatos .tbl{margin-top:8px}
 
+/* Inversión (Análisis) y enlace al detalle desde Inicio */
+.goal .foot{display:flex;justify-content:space-between;align-items:baseline;gap:10px}
+.goal .foot .note{margin:0}
+.goal .foot .link{flex:none}
+.kpi.inl{font-size:22px;margin:0}
+.goal .invest{margin-bottom:10px}
+.invest small{display:block;color:var(--muted);font-size:11px;margin-top:2px}
+.dist{display:flex;flex-direction:column}
+.drow{display:grid;grid-template-columns:minmax(0,1fr) auto minmax(64px,auto);gap:0 10px;align-items:center;padding:8px 0;border-bottom:1px solid var(--line)}
+.drow:last-child{border-bottom:0}
+.drow .n{min-width:0;font-weight:500;font-size:14px}
+.drow .n small{display:block;color:var(--muted);font-size:11.5px;font-weight:400;line-height:1.35}
+.drow .v{font-size:14px}
+.drow .d{font-size:12px;text-align:right}
+.drow.fuera .n{color:var(--muted)}
+.drow.alerta .n{color:var(--out)}
+.field textarea{border:1px solid var(--line);background:var(--surface);border-radius:10px;padding:10px 12px;font-size:14px;font-family:var(--f-mono);line-height:1.5;resize:vertical;min-height:84px}
+
 [hidden]{display:none!important}

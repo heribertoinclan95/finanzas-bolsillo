@@ -19,7 +19,10 @@ Capturado en el cel (`S.movs[]`, clave `finanzas-bolsillo-v1`):
 ```
 { id, fecha: "yyyy-mm-dd", desc, cat, monto: number>0, tipo: "Egreso"|"Ingreso", cuenta, exportado: bool, enviado?: ISO, creado: ISO }
 ```
-Configuración (`S.cfg`, misma clave): `v` (versión, hoy 2), `cuentas[]`, `categorias[]`, `reglas{categoria: [palabras]}`, `inversion{pct, reparto}`, `sync{url, clave}`.
+Configuración (`S.cfg`, misma clave): `v` (versión, hoy 2), `cuentas[]`, `categorias[]`, `reglas{categoria: [palabras]}`, `inversion{pct, reparto, instrumentos, metas}`, `sync{url, clave}`.
+
+- `inversion.pct` es el % vigente (lo usa Inicio). `reparto: [[nombre, fracción]]` es la distribución objetivo. `instrumentos: {nombre: [palabras]}` clasifica cada inversión por palabra completa en la descripción (sin coincidencia → "Sin clasificar"; dos o más → "Por revisar", nunca se asigna a ciegas). `metas: [{desde: "aaaa-mm", pct}]` registra desde qué mes aplica cada %; los meses anteriores al primer registro usan ese primer % y se marcan como **estimados** en pantalla.
+- `ensureInversion()` completa lo que falte en `cfg.inversion` sin depender de `cfg.v` y es idempotente: así convive con otras migraciones (seguridad también sube `cfg.v`). Al cambiar el % en Ajustes, `registrarMeta()` agrega o corrige la entrada del mes en curso y nunca reescribe meses anteriores.
 
 Copia de la hoja (`S.datos`, clave `finanzas-bolsillo-datos`, se puede borrar y volver a leer): `{ leido: ISO, filas: [[fecha, desc, cat, cantidad, tipo, cuenta]] }`.
 
@@ -37,7 +40,8 @@ Pestañas de la hoja: `Movimientos` (año en curso, donde escribe la app) y `His
 Barra inferior: **Inicio** (predeterminada) · **Movimientos** · **Análisis** · **Más**.
 
 - **Inicio** (`viewInicio` y `resumenMes` en `app.js`): solo el mes en curso, sin comparativos ni gráficas. Disponible = ingresos reales − gasto sin inversión − máx(meta de inversión, inversión realizada): la meta se aparta mientras no se invierte y, al invertir, no se descuenta dos veces. Es un margen según los registros, no el saldo bancario. El estimado (promedio de ingresos de los 3 meses anteriores con ingresos) solo aparece como referencia secundaria marcada "Estimado" cuando lo recibido es menor; el número principal nunca incluye dinero no cobrado.
-- **Más** (`viewMas`): secciones Google Sheet (enviar o copiar, conexión), Ajustes (meta de inversión, cuentas, categorías) y Respaldo, con el estado de sincronización siempre arriba.
+- **Análisis › Inversión** (`anInversion`, con `inversionMes`, `distribucion`, `historialInversion`): arriba el mes en curso (meta = ingresos reales × %, invertido, pendiente o extra, % de cumplimiento que puede pasar de 100, sugerencias aritméticas sobre tus propias reglas) y la distribución por instrumento (objetivo, real, diferencia); abajo el historial con su filtro de año (racha, proyección a 12 meses de aportaciones sin rendimientos, meta vs invertido, diferencia, meses por debajo, por instrumento). Inicio solo gana el botón "Ver detalle"; sus cálculos no cambian.
+- **Más** (`viewMas`): secciones Google Sheet (enviar o copiar, conexión), Ajustes (meta de inversión, reparto, instrumentos, cuentas, categorías) y Respaldo, con el estado de sincronización siempre arriba.
 - Gráficas (`lineChart`, `colChart`, `barsH`) interactivas sin librerías: el SVG lleva `data-chart` y `chartTip` dibuja el tooltip adentro con pointer events; `verDatos` agrega la tabla "Ver datos". En `barsH`, `{ drill: true }` lleva a Análisis › Categorías.
 
 ## Captura rápida
@@ -50,6 +54,6 @@ Barra inferior: **Inicio** (predeterminada) · **Movimientos** · **Análisis** 
 
 ## Dashboards (pestaña Análisis)
 
-Replican las páginas del Power BI "Finanzas Final": Resumen General, Gastos Global (Categorías), Comparativa Global (Años), Inversión Global, más Hábitos (tasa de ahorro, gasto diario, suscripciones, lo que más se repite, día de la semana). Inversión = egresos con categoría `Inversion`. Las gráficas son SVG hechas a mano (`lineChart`, `colChart`, `barsH`). Con un mes elegido, Resumen agrega proyección al cierre, gasto por día y el comparativo contra el mismo mes del año anterior (antes vivían en la pestaña Mes).
+Replican las páginas del Power BI "Finanzas Final": Resumen General, Gastos Global (Categorías), Comparativa Global (Años), Inversión (seguimiento de la meta, ver Pantallas), más Hábitos (tasa de ahorro, gasto diario, suscripciones, lo que más se repite, día de la semana). Inversión = egresos con categoría `Inversion`; nunca se mezcla con el gasto de consumo ni se confunde aportado con valor de cartera. Las gráficas son SVG hechas a mano (`lineChart`, `colChart`, `barsH`). Con un mes elegido, Resumen agrega proyección al cierre, gasto por día y el comparativo contra el mismo mes del año anterior (antes vivían en la pestaña Mes).
 
 `node tests/run.js datos.json` compara los totales por año contra Power BI cuando le pasas un JSON con filas `[fecha, desc, cat, cantidad, tipo, cuenta]` (no lo subas al repo).

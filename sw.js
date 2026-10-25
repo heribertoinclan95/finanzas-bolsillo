@@ -1,6 +1,6 @@
 /* Service worker: la app abre sin internet.
    Cada vez que cambies archivos de la app, sube VERSION para que el iPhone baje la nueva. */
-const VERSION = "v3";
+const VERSION = "v4";
 const CACHE = "finanzas-" + VERSION;
 const ARCHIVOS = ["./", "index.html", "styles.css", "app.js", "manifest.webmanifest",
   "icons/apple-touch-icon.png", "icons/icon-192.png", "icons/icon-512.png"];
