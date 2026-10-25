@@ -3,12 +3,14 @@
    - S.movs   → lo que capturas en el iPhone (localStorage, clave LKEY)
    - S.datos  → copia de tu Google Sheet (Histórico + Movimientos) para los dashboards (clave DKEY)
    Los dashboards usan filas() = hoja + lo capturado que aún no llega a la hoja.
+   Hoja: callScript() habla con el Worker protegido (/api/hoja); la URL y la clave del Apps Script son secretos del Worker.
+   El modo "directo" (URL y clave en el cel) solo existe mientras dura la transición; se cambia en Más › Google Sheet.
    Pestañas: Inicio (margen del mes en curso) · Movimientos · Análisis (subpestañas) · Más (hoja, ajustes, respaldo). */
 (() => {
 "use strict";
 
 /* ---------- Configuración ---------- */
-const CFG_VERSION = 2;
+const CFG_VERSION = 3;
 const CATEGORIAS = ["Comida", "Super", "Transporte", "Salida", "Subscripcion", "Salud", "Renta", "Entretenimiento", "Libros", "Inversion", "Educacion", "Negocio", "SAT", "Otros"];
 const DEFAULT_CFG = {
   v: CFG_VERSION,
@@ -30,7 +32,7 @@ const DEFAULT_CFG = {
     "Otros": ["ropa", "topps", "apuesta", "regalo"]
   },
   inversion: { pct: 0.20, reparto: [["NU", 0.6], ["GBM", 0.2], ["Bitcoin", 0.2]] },
-  sync: { url: "", clave: "" }
+  sync: { modo: "worker", url: "", clave: "" }   // modo: "worker" (por el Worker protegido) · "directo" (transición: URL y clave en el cel)
 };
 const LKEY = "finanzas-bolsillo-v1";
 const DKEY = "finanzas-bolsillo-datos";
@@ -51,7 +53,8 @@ const short = v => { const a = Math.abs(v); return (v < 0 ? "−" : "") + (a >= 
 const S = {
   movs: [], cfg: clone(DEFAULT_CFG), datos: null,
   tab: "inicio", ym: today().slice(0, 7), filter: "Todos", buscar: "",
-  expScope: "pend", sending: false, leyendo: false, mas: "hoja",
+  expScope: "pend", sending: false, leyendo: false, mas: "hoja", confirmarBorrado: false,
+  sesion: { estado: "desconocido", email: "", vence: 0 },   // sesión de Cloudflare Access: desconocido · activa · vencida · sin-worker
   an: { vista: "resumen", anio: String(new Date().getFullYear()), mes: 0, cat: "Comida", metrica: "Egreso" }
 };
 
@@ -74,6 +77,7 @@ function load() {
       S.movs = Array.isArray(j.movs) ? j.movs : [];
       S.cfg = { ...clone(DEFAULT_CFG), ...(j.cfg || {}), v: (j.cfg && j.cfg.v) || 1 };
       S.cfg.sync = { ...DEFAULT_CFG.sync, ...(S.cfg.sync || {}) };
+      if (S.cfg.sync.modo !== "directo") S.cfg.sync.modo = "worker";
     }
   } catch (e) { /* datos dañados: se empieza vacío */ }
   migrate();
@@ -93,6 +97,12 @@ function migrate() {
     S.cfg.reglas = reglas;
     S.movs.forEach(m => { if (m.cat === "Salud y bienestar") m.cat = "Salud"; });
     S.cfg.v = 2; changed = true;
+  }
+  if ((S.cfg.v || 1) < 3) {
+    // v3: la hoja se alcanza por el Worker protegido. Quien ya tenía URL y clave sigue en modo directo
+    // hasta que cambie al Worker en Más › Google Sheet; nada se borra solo (migración reversible).
+    S.cfg.sync.modo = S.cfg.sync.url ? "directo" : "worker";
+    S.cfg.v = 3; changed = true;
   }
   if (changed) persist();
 }
@@ -563,16 +573,19 @@ function exportRows() {
   return base.slice().sort((a, b) => (a.fecha + (a.creado || "")).localeCompare(b.fecha + (b.creado || "")));
 }
 const MAS = [["hoja", "Google Sheet"], ["ajustes", "Ajustes"], ["respaldo", "Respaldo"]];
-const conectada = () => !!(S.cfg.sync.url && S.cfg.sync.clave);
+const modoWorker = () => S.cfg.sync.modo !== "directo";
+/* "Conectada" = hay forma de llegar a la hoja: por el Worker (mientras no sepamos que falta configurarlo) o con URL y clave. */
+const conectada = () => modoWorker() ? S.sesion.estado !== "sin-worker" : !!(S.cfg.sync.url && S.cfg.sync.clave);
 const fechaHora = iso => new Date(iso).toLocaleString("es-MX", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
 /* Estado de la sincronización: siempre visible arriba de Más */
 function estadoSync() {
   const pend = S.movs.filter(m => !m.exportado).length;
-  const estado = !conectada() ? "Sin conexión con tu Google Sheet: puedes copiar y pegar las filas."
-    : !S.datos ? '<span class="ok">Conectada.</span> Aún no se ha traído tu historial.'
-    : `<span class="ok">Conectada.</span> ${S.datos.filas.length.toLocaleString("es-MX")} movimientos de tu hoja, al ${fechaHora(S.datos.leido)}.${S.datos.malas ? ` ${S.datos.malas} filas sin fecha o cantidad válida se omitieron.` : ""}`;
+  const via = !modoWorker() ? '<span class="ok">Conectada.</span>' : S.sesion.estado === "activa" ? '<span class="ok">Conectada por el Worker protegido.</span>' : "Por el Worker protegido.";
+  const estado = !conectada() ? (modoWorker() ? "El Worker protegido aún no está configurado: puedes copiar y pegar las filas." : "Sin conexión con tu Google Sheet: puedes copiar y pegar las filas.")
+    : !S.datos ? `${via} Aún no se ha traído tu historial.`
+    : `${via} ${S.datos.filas.length.toLocaleString("es-MX")} movimientos de tu hoja, al ${fechaHora(S.datos.leido)}.${S.datos.malas ? ` ${S.datos.malas} filas sin fecha o cantidad válida se omitieron.` : ""}`;
   return `<section class="card sync">
-    <p class="note">${estado}</p>
+    <p class="note">${estado}</p>${sesionTxt()}
     <p class="note">${pend ? `<span class="warn">${pend} movimiento${pend > 1 ? "s" : ""} sin pasar a la hoja.</span>` : "Todo lo capturado ya está en la hoja."}</p>
     ${conectada() ? `<button class="btn ghost small" id="readBtn" style="margin-top:10px" ${S.leyendo ? "disabled" : ""}>${S.leyendo ? "Actualizando…" : "Actualizar desde la hoja"}</button>` : ""}
   </section>`;
@@ -599,13 +612,38 @@ function masHoja() {
       </div>` :
       `<p class="note" style="padding:14px 0">${S.expScope === "pend" ? "Todo está pasado a tu hoja." : "No capturaste nada desde el cel este mes."}</p>`}
   </section>
-  <section class="card"><h3>Conexión con Google Sheet</h3>
+  ${cardConexion()}`;
+}
+/* Estado de la sesión de Cloudflare Access (solo en modo Worker). */
+function sesionTxt() {
+  if (!modoWorker()) return "";
+  const s = S.sesion;
+  if (s.estado === "vencida") return `<p class="note"><span class="warn">Tu sesión de Cloudflare venció.</span> <button class="btn small" type="button" id="loginBtn">Entrar</button></p>`;
+  if (s.estado === "activa" && s.email) return `<p class="note">Sesión de ${esc(s.email)}${s.vence ? ", vence el " + fechaHora(s.vence * 1000) : ""}.</p>`;
+  return "";
+}
+/* Conexión con la hoja. Modo Worker: nada que capturar, solo probar y entrar de nuevo a Cloudflare.
+   Modo directo (transición): el formulario de siempre más el paso al Worker; las credenciales no se borran solas. */
+function cardConexion() {
+  const s = S.cfg.sync, conCred = !!(s.url && s.clave);
+  const entrar = S.sesion.estado === "vencida" ? "" : `<button class="btn ghost small" type="button" id="loginBtn">Entrar a Cloudflare</button>`;
+  if (modoWorker()) {
+    return `<section class="card"><h3>Conexión con Google Sheet</h3>
+    <p class="note">Los envíos pasan por el Worker protegido de Cloudflare. La URL y la clave de tu Apps Script viven como secretos del servidor, no en este iPhone.</p>
+    <div class="btns"><button class="btn ghost small" type="button" id="testBtn">Probar conexión</button>${entrar}</div>
+    ${conCred ? `<p class="note" style="margin-top:14px">Este iPhone todavía guarda la URL y la clave del modo directo. Cuando confirmes que el Worker funciona, bórralas; mientras, puedes volver al modo directo.</p>
+    <div class="btns"><button class="btn ghost small" type="button" id="directoBtn">Volver al modo directo</button><button class="btn ghost small" type="button" id="borrarCredBtn">${S.confirmarBorrado ? "¿Seguro? Toca otra vez" : "Borrar credenciales del teléfono"}</button></div>` : ""}
+  </section>`;
+  }
+  return `<section class="card"><h3>Conexión con Google Sheet</h3>
     <form class="stack" id="syncForm">
-      <p class="note">${conectado ? "“Enviar” agrega las filas directo a Finanzas 2026. Cambia la URL o la clave solo si vuelves a publicar el Apps Script." : "Pega aquí la URL y la clave de tu Apps Script (las instrucciones están en el README del repo). Sin conexión puedes seguir copiando y pegando."}</p>
-      <div class="field"><span class="label">URL del Apps Script</span><input id="syncUrl" type="url" inputmode="url" autocomplete="off" placeholder="https://script.google.com/macros/s/…/exec" value="${esc(S.cfg.sync.url)}"></div>
-      <div class="field"><span class="label">Clave</span><input id="syncClave" type="password" autocomplete="off" autocapitalize="off" value="${esc(S.cfg.sync.clave)}"></div>
+      <p class="note">${conCred ? "“Enviar” agrega las filas directo a Finanzas 2026. Cambia la URL o la clave solo si vuelves a publicar el Apps Script." : "Pega aquí la URL y la clave de tu Apps Script (las instrucciones están en el README del repo). Sin conexión puedes seguir copiando y pegando."}</p>
+      <div class="field"><span class="label">URL del Apps Script</span><input id="syncUrl" type="url" inputmode="url" autocomplete="off" placeholder="https://script.google.com/macros/s/…/exec" value="${esc(s.url)}"></div>
+      <div class="field"><span class="label">Clave</span><input id="syncClave" type="password" autocomplete="off" autocapitalize="off" value="${esc(s.clave)}"></div>
       <div class="btns"><button class="btn ghost small" type="button" id="testBtn">Probar conexión</button><button class="btn small" type="submit">Guardar</button></div>
     </form>
+    <p class="note" style="margin-top:14px"><b>Modo protegido (nuevo).</b> Cuando el Worker y Cloudflare Access estén listos, pruébalo y cámbiate aquí. Tus credenciales se quedan en el cel hasta que tú las borres.</p>
+    <div class="btns"><button class="btn ghost small" type="button" id="probarWorkerBtn">Probar el Worker</button><button class="btn small" type="button" id="usarWorkerBtn">Usar el Worker protegido</button>${entrar}</div>
   </section>`;
 }
 function masAjustes() {
@@ -744,12 +782,47 @@ let tT;
 function toast(t) { const el = $("#toast"); el.textContent = t; el.hidden = false; clearTimeout(tT); tT = setTimeout(() => el.hidden = true, 2800); }
 
 /* ---------- Google Sheet ---------- */
+const API = "api/hoja";                                              // ruta del Worker protegido (misma página)
+const XHR = { "X-Requested-With": "XMLHttpRequest" };                // con esto Access contesta 401 y no una redirección
+const sinSesion = estado => { S.sesion = { estado, email: "", vence: 0 }; };
 async function callScript(payload) {
-  // text/plain evita la verificación CORS previa que Apps Script no responde
-  const res = await fetch(S.cfg.sync.url, { method: "POST", headers: { "Content-Type": "text/plain;charset=utf-8" }, body: JSON.stringify({ clave: S.cfg.sync.clave, ...payload }) });
-  const j = await res.json();
+  let res, j;
+  if (modoWorker()) {
+    // El Worker de Cloudflare reenvía al Apps Script con la URL y la clave que viven en el servidor; aquí nunca viajan.
+    res = await fetch(API, { method: "POST", headers: { "Content-Type": "application/json", ...XHR }, body: JSON.stringify(payload) });
+    if (res.status === 401 || res.redirected) { sinSesion("vencida"); throw new Error("tu sesión de Cloudflare venció. Entra de nuevo desde Más."); }
+    if (res.status === 503 || res.status === 404 || res.status === 405) {
+      sinSesion("sin-worker"); j = await res.json().catch(() => null);
+      throw new Error((j && j.error) || "el Worker protegido aún no está configurado");
+    }
+    j = await res.json().catch(() => null);
+    if (!j) throw new Error("el Worker respondió algo inesperado (HTTP " + res.status + ")");
+  } else {
+    // Modo directo (transición): text/plain evita la verificación CORS previa que Apps Script no responde
+    res = await fetch(S.cfg.sync.url, { method: "POST", headers: { "Content-Type": "text/plain;charset=utf-8" }, body: JSON.stringify({ clave: S.cfg.sync.clave, ...payload }) });
+    j = await res.json();
+  }
   if (!j.ok) throw new Error(j.error || "La hoja rechazó la solicitud");
+  if (modoWorker() && S.sesion.estado !== "activa") S.sesion = { ...S.sesion, estado: "activa" };
   return j;
+}
+/* Modo Worker: pregunta quién está en sesión (correo y vencimiento) para mostrarlo en Más. */
+async function revisarSesion(silencioso) {
+  if (!modoWorker() || navigator.onLine === false) return;
+  try {
+    const res = await fetch("api/yo", { headers: XHR });
+    if (res.status === 401) sinSesion("vencida");
+    else if (res.status === 503 || res.status === 404 || res.status === 405) sinSesion("sin-worker");
+    else { const j = await res.json(); if (j.ok) S.sesion = { estado: "activa", email: j.email || "", vence: j.vence || 0 }; }
+    render();
+  } catch (e) { if (!silencioso) toast("No se pudo revisar la sesión"); }
+}
+async function probarHoja() {
+  try {
+    const j = await callScript({ accion: "ping" });
+    toast("Conectada a la hoja “" + (j.hoja || "") + "”" + (j.historico === false ? " (sin pestaña Historico)" : "") + (modoWorker() ? " por el Worker" : ""));
+    return true;
+  } catch (err) { toast("No conectó: " + err.message); return false; }
 }
 async function sendPending() {
   const pend = S.movs.filter(m => !m.exportado);
@@ -767,7 +840,7 @@ async function sendPending() {
   } finally { S.sending = false; render(); }
 }
 async function readSheet(silencioso) {
-  if (!S.cfg.sync.url || !S.cfg.sync.clave || S.leyendo) return;
+  if (!conectada() || S.leyendo) return;
   S.leyendo = true; if (!silencioso) render();
   try {
     const j = await callScript({ accion: "leer" });
@@ -781,8 +854,10 @@ async function readSheet(silencioso) {
 }
 
 /* ---------- Respaldo ---------- */
+/* El respaldo nunca lleva la URL ni la clave del Apps Script. */
+const respaldoJSON = () => ({ app: "finanzas-bolsillo", version: 2, fecha: new Date().toISOString(), movs: S.movs, cfg: { ...S.cfg, sync: { ...DEFAULT_CFG.sync, modo: S.cfg.sync.modo } } });
 function backup() {
-  const blob = new Blob([JSON.stringify({ app: "finanzas-bolsillo", version: 2, fecha: new Date().toISOString(), movs: S.movs, cfg: { ...S.cfg, sync: { url: "", clave: "" } } }, null, 1)], { type: "application/json" });
+  const blob = new Blob([JSON.stringify(respaldoJSON(), null, 1)], { type: "application/json" });
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob); a.download = "finanzas-respaldo-" + today() + ".json";
   document.body.appendChild(a); a.click(); a.remove();
@@ -846,15 +921,31 @@ $("#main").addEventListener("click", async e => {
   if (t.id === "sendBtn") { await sendPending(); readSheet(true); }
   if (t.id === "readBtn") readSheet(false);
   if (t.id === "testBtn") {
-    const url = $("#syncUrl").value.trim(), clave = $("#syncClave").value;
-    if (!url) { toast("Pega primero la URL del Apps Script"); return; }
-    const prev = S.cfg.sync; S.cfg.sync = { url, clave };
     t.textContent = "Probando…";
-    try { const j = await callScript({ accion: "ping" }); toast("Conectada a la hoja “" + (j.hoja || "") + "”" + (j.historico === false ? " (sin pestaña Historico)" : "")); }
-    catch (err) { toast("No conectó: " + err.message); }
-    S.cfg.sync = prev;
+    if (modoWorker()) { if (S.sesion.estado === "sin-worker") sinSesion("desconocido"); await probarHoja(); }
+    else {
+      const url = $("#syncUrl").value.trim(), clave = $("#syncClave").value;
+      if (!url) { toast("Pega primero la URL del Apps Script"); t.textContent = "Probar conexión"; return; }
+      const prev = S.cfg.sync; S.cfg.sync = { ...prev, url, clave };
+      await probarHoja();
+      S.cfg.sync = prev;
+    }
     t.textContent = "Probar conexión";
+    render();
   }
+  if (t.id === "probarWorkerBtn" || t.id === "usarWorkerBtn") {   // desde el modo directo: prueba el Worker sin perder las credenciales
+    const prev = S.cfg.sync; S.cfg.sync = { ...prev, modo: "worker" }; sinSesion("desconocido");
+    const ok = await probarHoja();
+    if (ok && t.id === "usarWorkerBtn") { persist(); toast("Listo: los envíos pasan por el Worker protegido"); revisarSesion(true); }
+    else S.cfg.sync = prev;
+    render();
+  }
+  if (t.id === "directoBtn") { S.cfg.sync.modo = "directo"; S.confirmarBorrado = false; persist(); render(); toast("De vuelta al modo directo"); }
+  if (t.id === "borrarCredBtn") {                                   // dos toques: el borrado no tiene vuelta atrás
+    if (!S.confirmarBorrado) { S.confirmarBorrado = true; render(); return; }
+    S.confirmarBorrado = false; S.cfg.sync = { ...S.cfg.sync, url: "", clave: "" }; persist(); render(); toast("Credenciales borradas de este iPhone");
+  }
+  if (t.id === "loginBtn") location.assign("api/entrar");           // Access pide el código y regresa a la app
   if (t.id === "backupBtn") backup();
 });
 // Gráficas: tocar o arrastrar muestra el valor. Con mouse se oculta al salir; en táctil se queda hasta tocar fuera.
@@ -881,7 +972,7 @@ $("#main").addEventListener("input", e => { if (e.target.id === "buscar") { S.bu
 $("#main").addEventListener("submit", e => {
   e.preventDefault();
   if (e.target.id === "syncForm") {
-    S.cfg.sync = { url: $("#syncUrl").value.trim(), clave: $("#syncClave").value };
+    S.cfg.sync = { ...S.cfg.sync, url: $("#syncUrl").value.trim(), clave: $("#syncClave").value };
     persist(); render(); toast(S.cfg.sync.url ? "Conexión guardada" : "Conexión quitada");
     if (S.cfg.sync.url) readSheet(false);
     return;
@@ -908,7 +999,10 @@ load();
 render();
 if (new URLSearchParams(location.search).has("nuevo")) openSheet(null);
 if (datosViejos()) readSheet(true);
+revisarSesion(true);
+// El service worker se registra aquí y no en index.html: la CSP de _headers no permite scripts en línea.
+if ("serviceWorker" in navigator) window.addEventListener("load", () => navigator.serviceWorker.register("sw.js").catch(() => {}));
 
 // Funciones puras para pruebas en Node
-if (typeof module !== "undefined") module.exports = { parseQuick, toRow, toTSV, normTipo, normCat, S, filas, migrate, margen, promIngresos3m, resumenMes, lineChart, colChart, barsH, sendPending, render };
+if (typeof module !== "undefined") module.exports = { parseQuick, toRow, toTSV, normTipo, normCat, S, filas, migrate, margen, promIngresos3m, resumenMes, lineChart, colChart, barsH, sendPending, render, callScript, respaldoJSON, revisarSesion, conectada, modoWorker };
 })();
