@@ -200,6 +200,7 @@ const t = async (name, fn) => { await fn(); n++; console.log("✓", name); };
       }
     });
   }
+  n += await require("./conciliacion.js")();   // conciliación bancaria (Fase 4)
   console.log(`\n${n} pruebas OK`);
   process.exit(0);
 })().catch(e => { console.error("\n✗", e.message); process.exit(1); });

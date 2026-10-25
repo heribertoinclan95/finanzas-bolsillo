@@ -3,7 +3,7 @@
    - S.movs   → lo que capturas en el iPhone (localStorage, clave LKEY)
    - S.datos  → copia de tu Google Sheet (Histórico + Movimientos) para los dashboards (clave DKEY)
    Los dashboards usan filas() = hoja + lo capturado que aún no llega a la hoja.
-   Pestañas: Inicio (margen del mes en curso) · Movimientos · Análisis (subpestañas) · Más (hoja, ajustes, respaldo). */
+   Pestañas: Inicio (margen del mes en curso) · Movimientos · Análisis (subpestañas) · Más (hoja, conciliar, ajustes, respaldo). */
 (() => {
 "use strict";
 
@@ -55,6 +55,9 @@ const S = {
   an: { vista: "resumen", anio: String(new Date().getFullYear()), mes: 0, cat: "Comida", metrica: "Egreso" }
 };
 
+/* ---------- Conciliación bancaria (Más › Conciliar): motor en conciliacion.js, vistas en conciliacion-ui.js ---------- */
+const CZU = typeof ConciliacionUI !== "undefined" ? ConciliacionUI : null;
+
 /* ---------- Normalización (mismas reglas para hoja, histórico y captura) ---------- */
 const CANON = Object.fromEntries(CATEGORIAS.concat(["Ingreso"]).map(c => [c.toLowerCase(), c]));
 Object.assign(CANON, { "libro": "Libros", "ingresos": "Ingreso", "suscripcion": "Subscripcion", "suscripción": "Subscripcion", "inversión": "Inversion", "educación": "Educacion", "salud y bienestar": "Salud" });
@@ -101,7 +104,7 @@ function persist() {
   catch (e) { toast("No se pudo guardar en el teléfono. Libera espacio y vuelve a intentar."); return false; }
 }
 function saveDatos() { try { localStorage.setItem(DKEY, JSON.stringify(S.datos)); } catch (e) { toast("Tu historial no cupo en el teléfono; se usará solo mientras la app esté abierta."); } }
-function addMov(m) { S.movs.push({ id: uid(), ...m }); persist(); }
+function addMov(m) { const id = uid(); S.movs.push({ id, ...m }); persist(); return id; }
 function updMov(id, patch) { const m = S.movs.find(x => x.id === id); if (m) Object.assign(m, patch); persist(); }
 function delMov(id) { S.movs = S.movs.filter(x => x.id !== id); persist(); }
 
@@ -562,7 +565,7 @@ function exportRows() {
   const base = S.expScope === "pend" ? S.movs.filter(m => !m.exportado) : S.movs.filter(m => m.fecha.slice(0, 7) === S.ym);
   return base.slice().sort((a, b) => (a.fecha + (a.creado || "")).localeCompare(b.fecha + (b.creado || "")));
 }
-const MAS = [["hoja", "Google Sheet"], ["ajustes", "Ajustes"], ["respaldo", "Respaldo"]];
+const MAS = [["hoja", "Google Sheet"], ["conciliar", "Conciliar"], ["ajustes", "Ajustes"], ["respaldo", "Respaldo"]];
 const conectada = () => !!(S.cfg.sync.url && S.cfg.sync.clave);
 const fechaHora = iso => new Date(iso).toLocaleString("es-MX", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
 /* Estado de la sincronización: siempre visible arriba de Más */
@@ -579,8 +582,10 @@ function estadoSync() {
 }
 function viewMas() {
   const chips = `<div class="filters seg-tabs" role="tablist" aria-label="Sección">${MAS.map(([k, n]) => `<button class="chip" data-mas="${k}" aria-pressed="${S.mas === k}">${n}</button>`).join("")}</div>`;
-  return chips + estadoSync() + { hoja: masHoja, ajustes: masAjustes, respaldo: masRespaldo }[S.mas]();
+  return chips + estadoSync() + { hoja: masHoja, conciliar: masConciliar, ajustes: masAjustes, respaldo: masRespaldo }[S.mas]();
 }
+/* Más › Conciliar: estado de cuenta contra lo registrado. Todo vive en conciliacion-ui.js. */
+function masConciliar() { return CZU ? CZU.view() : '<section class="card"><p class="note">La conciliación no está disponible en esta versión.</p></section>'; }
 function masHoja() {
   const rows = exportRows(), pend = rows.filter(m => !m.exportado).length, conectado = conectada();
   return `<section class="card exp">
@@ -733,7 +738,7 @@ function save() {
   const rec = { fecha: d.fecha || today(), desc: (d.desc || "").trim(), cat: d.tipo === "Ingreso" ? "Ingreso" : (d.cat || "Otros"), monto, tipo: d.tipo, cuenta: d.cuenta };
   const editing = !!d.id;
   if (editing) updMov(d.id, { ...rec, exportado: d.exportado });
-  else addMov({ ...rec, exportado: false, creado: new Date().toISOString() });
+  else { const id = addMov({ ...rec, exportado: false, creado: new Date().toISOString() }); if (d._cz && CZU) CZU.registrado(d._cz, id, rec); }   // _cz: viene de Más › Conciliar
   closeSheet();
   S.ym = rec.fecha.slice(0, 7);
   render();
@@ -813,6 +818,7 @@ window.addEventListener("online", render); window.addEventListener("offline", re
 
 $("#main").addEventListener("click", async e => {
   const t = e.target.closest("button"); if (!t) return;
+  if (t.dataset.cz && CZU && CZU.click(t)) return;     // Más › Conciliar
   if (t.dataset.go) {                                  // "Ver todos" y "Ver" desde Inicio
     S.tab = t.dataset.go;
     if (S.tab === "movs") { S.buscar = ""; S.ym = today().slice(0, 7); }
@@ -872,6 +878,7 @@ $("#main").addEventListener("pointerout", e => {
   if (svg && e.pointerType === "mouse" && !svg.contains(e.relatedTarget)) hideTip(svg);
 });
 $("#main").addEventListener("change", e => {
+  if (e.target.dataset.cz && CZU && CZU.change(e.target)) return;
   if (e.target.id === "restoreFile" && e.target.files[0]) restore(e.target.files[0]);
   if (e.target.id === "fAnio") { S.an.anio = e.target.value; render(); }
   if (e.target.id === "fMes") { S.an.mes = +e.target.value; render(); }
@@ -880,6 +887,7 @@ let tB;
 $("#main").addEventListener("input", e => { if (e.target.id === "buscar") { S.buscar = e.target.value; clearTimeout(tB); tB = setTimeout(render, 250); } });
 $("#main").addEventListener("submit", e => {
   e.preventDefault();
+  if (e.target.dataset.cz && CZU && CZU.submit(e.target)) return;
   if (e.target.id === "syncForm") {
     S.cfg.sync = { url: $("#syncUrl").value.trim(), clave: $("#syncClave").value };
     persist(); render(); toast(S.cfg.sync.url ? "Conexión guardada" : "Conexión quitada");
@@ -904,11 +912,12 @@ document.addEventListener("visibilitychange", () => { if (!document.hidden && da
 const datosViejos = () => !S.datos || (Date.now() - new Date(S.datos.leido)) > 3 * 36e5;
 
 // Arranque
+if (CZU) CZU.init({ S, esc, fmt, fmtC, ddmmaa, fechaHora, filas, guessCat, openSheet, addMov, toast, render, today });
 load();
 render();
 if (new URLSearchParams(location.search).has("nuevo")) openSheet(null);
 if (datosViejos()) readSheet(true);
 
 // Funciones puras para pruebas en Node
-if (typeof module !== "undefined") module.exports = { parseQuick, toRow, toTSV, normTipo, normCat, S, filas, migrate, margen, promIngresos3m, resumenMes, lineChart, colChart, barsH, sendPending, render };
+if (typeof module !== "undefined") module.exports = { parseQuick, toRow, toTSV, normTipo, normCat, S, filas, migrate, margen, promIngresos3m, resumenMes, lineChart, colChart, barsH, sendPending, render, addMov };
 })();

@@ -228,3 +228,34 @@ button.bar{border:0;background:none;padding:0;width:100%;text-align:left;font:in
 .verdatos .tbl{margin-top:8px}
 
 [hidden]{display:none!important}
+
+/* Conciliación bancaria (Más › Conciliar) */
+.cz-cargar{display:block;text-align:center;margin-top:12px}
+.cz-list{display:flex;flex-direction:column;gap:8px}
+.cz-item{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:10px 12px;display:flex;flex-direction:column;gap:8px}
+.cz-head{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;align-items:center;margin:0}
+.cz-head.sel{grid-template-columns:auto minmax(0,1fr) auto}
+.cz-head input[type=checkbox]{width:20px;height:20px;margin:0;accent-color:var(--accent)}
+.cz-head .d,.cz-c .d{min-width:0}
+.cz-head strong,.cz-c strong{display:block;font-weight:500;font-size:13.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-transform:uppercase;letter-spacing:.01em}
+.cz-head small,.cz-c small{display:block;color:var(--muted);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cz-head .m{font-family:var(--f-mono);font-variant-numeric:tabular-nums;font-size:14.5px;font-weight:500;color:var(--out);white-space:nowrap}
+.cz-head .m.in{color:var(--in)}
+.cz-acts{display:flex;gap:6px;flex-wrap:wrap}
+.cz-acts .btn{flex:1 1 auto}
+.cz-cand{border-top:1px dashed var(--line);padding-top:8px;display:flex;flex-direction:column;gap:8px}
+.cz-c{display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:8px;align-items:center}
+.cz-c strong{font-size:13px}
+.cz-c small{white-space:normal}
+.cz-tag{display:inline-block;font-size:10px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;border:1px solid var(--line);border-radius:999px;padding:0 6px;margin:2px 4px 0 0;color:var(--muted)}
+.cz-link{margin:0;font-size:12.5px;color:var(--muted);line-height:1.4}
+.cz-link b{color:var(--ink);font-weight:500;text-transform:uppercase}
+.tbl td.cz-desc{max-width:130px;overflow:hidden;text-overflow:ellipsis;font-family:var(--f-body);text-align:left}
+.cz-varios{display:flex;flex-direction:column;gap:10px;max-height:50vh;overflow:auto}
+.cz-v{display:flex;flex-direction:column;gap:6px;background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:10px}
+.cz-vh{display:flex;justify-content:space-between;align-items:baseline;font-size:14px}
+.cz-vh small{color:var(--muted)}
+.cz-v input,.cz-v select{border:1px solid var(--line);background:var(--bg);border-radius:10px;padding:9px 11px;font-size:15px}
+.cz-vacio{text-align:center;color:var(--muted);padding:22px 10px;font-size:13.5px}
+.strip .btns{flex-wrap:nowrap}
+.strip .btns .btn{flex:none}
